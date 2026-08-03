@@ -862,7 +862,98 @@ def make_collision(objects=None, shape="box", padding=0.0, reduce_to=200,
     }
 
 
-# ------------------------------------------------------------ 7. 익스포트
+# ------------------------------------------------------------ 7. 임포트
+
+def import_fbx(path=None, namespace=None, group=None, up_axis="y",
+               scale_factor=1.0, import_mode="add"):
+    """FBX 를 현재 씬으로 가져옵니다. 언리얼에서 뽑은 레벨 에셋을 받는 경로입니다.
+
+    path: FBX 파일 경로.
+    namespace: 지정하면 그 네임스페이스로 임포트합니다. 언리얼에서 받은 것과
+        기존 씬 오브젝트의 이름이 겹칠 때 씁니다. 비우면 네임스페이스 없이
+        들어오고, 이름이 겹치면 Maya 가 뒤에 숫자를 붙입니다.
+    group: 지정하면 새로 들어온 최상위 노드를 이 이름의 그룹으로 묶습니다.
+    up_axis: 원본 FBX 의 업 축. 언리얼은 Z-up 이지만 언리얼 FBX 익스포터가
+        보통 Y-up 으로 내보내므로 기본값은 "y" 입니다. 임포트 결과가 90도
+        누워 있으면 "z" 로 바꿔보세요.
+    scale_factor: 임포트 스케일. Maya 와 언리얼 모두 cm 면 1.0 입니다.
+    import_mode: "add"(새로 추가) | "merge"(같은 이름 노드에 병합) |
+        "exmerge"(존재하는 것만 갱신).
+    """
+    if not path:
+        raise ValueError("path 가 필요합니다.")
+    if not os.path.isfile(path):
+        raise ValueError("파일을 찾을 수 없습니다: %s" % path)
+    if import_mode not in ("add", "merge", "exmerge"):
+        raise ValueError("import_mode 는 add / merge / exmerge 중 하나여야 합니다.")
+
+    if not cmds.pluginInfo("fbxmaya", q=True, loaded=True):
+        cmds.loadPlugin("fbxmaya", quiet=True)
+
+    scene_unit = cmds.currentUnit(q=True, linear=True)
+    warnings = []
+    if scene_unit != "cm":
+        warnings.append(
+            "씬 단위가 %s 입니다. 언리얼은 cm 기준이라 크기가 %s 배로 어긋날 수 "
+            "있습니다. 임포트 후 크기를 확인하세요." % (scene_unit, scene_unit))
+
+    mel.eval("FBXResetImport")
+    mel.eval("FBXImportMode -v %s" % import_mode)
+    mel.eval("FBXImportUpAxis %s" % up_axis)
+    mel.eval("FBXImportScaleFactor %f" % float(scale_factor))
+    mel.eval("FBXImportProtectDrivenKeys -v false")
+    mel.eval("FBXImportMergeAnimationLayers -v false")
+    mel.eval("FBXImportConvertDeformingNullsToJoint -v false")
+    mel.eval("FBXImportHardEdges -v false")
+    mel.eval("FBXImportCacheFile -v false")
+
+    before = set(cmds.ls(long=True))
+
+    kwargs = {"i": True, "type": "FBX", "ignoreVersion": True,
+              "mergeNamespacesOnClash": False, "options": "fbx",
+              "preserveReferences": True, "returnNewNodes": False}
+    if namespace:
+        kwargs["namespace"] = namespace
+    cmds.file(path, **kwargs)
+
+    new_nodes = sorted(set(cmds.ls(long=True)) - before)
+    new_transforms = [n for n in new_nodes if cmds.objectType(n) == "transform"]
+    # 최상위(부모가 없거나 부모가 이번에 안 들어온 것)만 추립니다.
+    roots = []
+    for node in new_transforms:
+        parent = (cmds.listRelatives(node, parent=True, fullPath=True) or [None])[0]
+        if parent is None or parent not in new_transforms:
+            roots.append(node)
+
+    # 집계는 그룹핑 **전에** 끝냅니다. cmds.group 은 노드를 재부모화하므로
+    # new_nodes 에 담긴 전체 경로가 그 즉시 무효가 됩니다.
+    meshes = [n for n in new_nodes if cmds.objectType(n) == "mesh"]
+    joints = [n for n in new_nodes if cmds.objectType(n) == "joint"]
+
+    grouped = None
+    if group and roots:
+        grouped = cmds.group(roots, name=group)
+        roots = [grouped]
+
+    result = {
+        "path": path,
+        "scene_unit": scene_unit,
+        "up_axis": up_axis,
+        "scale_factor": scale_factor,
+        "roots": [_short(r) for r in roots],
+        "counts": {"new_nodes": len(new_nodes), "transforms": len(new_transforms),
+                   "meshes": len(meshes), "joints": len(joints)},
+        "group": _short(grouped) if grouped else None,
+        "warnings": warnings,
+    }
+    if not new_nodes:
+        result["warnings"].append(
+            "새로 들어온 노드가 없습니다. import_mode 가 'merge'/'exmerge' 이거나 "
+            "빈 FBX 일 수 있습니다.")
+    return result
+
+
+# ------------------------------------------------------------ 8. 익스포트
 
 def export_fbx(objects=None, path=None, smoothing_groups=True, tangents=True,
                triangulate=False, skins=False, blendshapes=False,

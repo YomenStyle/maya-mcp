@@ -55,7 +55,7 @@ install_maya.py        Maya 쪽 원버튼 설치
 server.py              엔트리 포인트 (기존 MCP 등록 경로 유지용)
 ```
 
-## 툴 목록 (15개)
+## 툴 목록 (16개)
 
 | 계층 | 툴 | 역할 |
 |---|---|---|
@@ -78,6 +78,7 @@ server.py              엔트리 포인트 (기존 MCP 등록 경로 유지용)
 | `maya_unreal_cleanup_materials` | 변경 | 미사용 셰이딩 그룹 삭제, `M_` 리네임 |
 | `maya_unreal_make_lods` | 생성 | LOD 메시 생성 + Maya LOD 그룹 |
 | `maya_unreal_make_collision` | 생성 | `UBX_`/`USP_`/`UCP_`/`UCX_` 콜리전 |
+| `maya_unreal_import_fbx` | 입력 | FBX 를 Maya 로 가져오기 (언리얼 레벨 에셋 수신) |
 | `maya_unreal_export_fbx` | 출력 | 언리얼 프리셋 FBX |
 
 **감사(읽기 전용)를 먼저 두는 구조입니다.** 보지 않고 고치면 되돌릴 수 없는 문제
@@ -198,18 +199,38 @@ claude mcp add maya -- C:\path\to\maya-mcp\.venv\Scripts\python.exe C:\path\to\m
 
 콜리전 메시는 원본과 **같은 FBX 에 함께** 익스포트해야 언리얼이 인식합니다.
 
+## 언리얼과의 에셋 왕복
+
+Maya 쪽 절반은 완성돼 검증까지 마쳤습니다.
+
+| 방향 | Maya 쪽 | 언리얼 쪽 |
+|---|---|---|
+| Maya → 언리얼 | `maya_unreal_export_fbx` ✅ | `asset.import_fbx` ❌ 미구현 |
+| 언리얼 → Maya | `maya_unreal_import_fbx` ✅ | `level.export_selected` ❌ 미구현 |
+
+FBX 왕복은 실기에서 좌표까지 보존되는 것을 확인했습니다(반지름 6.0 원형 배치를
+내보냈다 되가져와 위치·삼각형 수 일치).
+
+**언리얼 쪽 커맨드 3개는 아직 없습니다.** 자매 저장소
+[unreal-mcp-bridge](https://github.com/YomenStyle/unreal-mcp-bridge) 에 C++ 로
+추가해야 하며, JSON-RPC 계약과 구현 메모를 [docs/UNREAL_SIDE.md](docs/UNREAL_SIDE.md)
+에 정리해 뒀습니다. 그 문서의 코드는 **빌드·검증되지 않았습니다.**
+
+그전까지는 사용자가 언리얼에서 직접 뽑아둔 FBX 를 `maya_unreal_import_fbx` 로
+받는 방식으로 쓸 수 있습니다.
+
 ## 테스트
 
-세 개의 스위트가 있고, 전부 통과 상태입니다 (Maya 2022.x + Python 3.12.10 + `mcp` 2.0.0 검증).
+네 개의 스위트가 있고, 전부 통과 상태입니다 (Maya 2022.x + Python 3.12.10 + `mcp` 2.0.0 검증).
 
 ```bash
 # 1. Maya 쪽 로직 (31개) — Maya 의 Python 3.7 에서 실제로 돌립니다
 "C:\Program Files\Autodesk\Maya2022\bin\mayapy.exe" tests/test_bridge_mayapy.py
 
-# 2. 서버 전송 계층 (24개) — 목 브릿지 상대. Maya 불필요
+# 2. 서버 전송 계층 (25개) — 목 브릿지 상대. Maya 불필요
 .venv\Scripts\python.exe tests/test_server_protocol.py
 
-# 3. MCP 엔드투엔드 (5개) — 실제 MCP 클라이언트로 핸드셰이크·툴 호출. Maya 불필요
+# 3. MCP 엔드투엔드 (6개) — 실제 MCP 클라이언트로 핸드셰이크·툴 호출. Maya 불필요
 .venv\Scripts\python.exe tests/test_e2e_stdio.py
 
 # 4. GUI 스모크 — Maya 를 띄우고 브릿지를 start() 한 상태에서 실행

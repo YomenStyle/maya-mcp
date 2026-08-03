@@ -351,6 +351,7 @@ _METHODS = {
     "unreal.make_lods":        (_unreal_method("make_lods"), True),
     "unreal.make_collision":   (_unreal_method("make_collision"), True),
     "unreal.export_fbx":       (_unreal_method("export_fbx"), False),
+    "unreal.import_fbx":       (_unreal_method("import_fbx"), True),
 }
 
 

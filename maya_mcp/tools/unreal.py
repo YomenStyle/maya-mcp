@@ -180,6 +180,41 @@ def register_unreal_tools(mcp, conn: MayaConnection) -> None:
             "objects": objects, "shape": shape, "padding": padding,
             "reduce_to": reduce_to, "dry_run": dry_run})
 
+    # ---------------------------------------------------------- 입력
+
+    @mcp.tool()
+    def maya_unreal_import_fbx(path: str, namespace: str | None = None,
+                               group: str | None = None, up_axis: str = "y",
+                               scale_factor: float = 1.0,
+                               import_mode: str = "add") -> dict:
+        """FBX 를 현재 Maya 씬으로 가져옵니다. 언리얼 레벨 에셋을 받는 경로입니다.
+
+        임포트 후 **maya_viewport_capture 로 확인하세요.** 축이나 스케일이 틀어지면
+        형태는 멀쩡한데 90도 누워 있거나 100배 크게 들어옵니다. 반환값의
+        `warnings` 도 반드시 읽고 사용자에게 전달하세요.
+
+        언리얼에서 FBX 를 뽑는 것은 이 툴의 범위 밖입니다. 언리얼 쪽 플러그인이
+        해야 하며, 아직 구현돼 있지 않습니다(docs/UNREAL_SIDE.md 참고). 지금은
+        사용자가 직접 뽑아둔 FBX 를 받는 용도로 쓰입니다.
+
+        Args:
+            path: FBX 파일 경로.
+            namespace: 지정하면 그 네임스페이스로 임포트합니다. 기존 씬 오브젝트와
+                이름이 겹칠 때 쓰세요. 비우면 Maya 가 뒤에 숫자를 붙입니다.
+            group: 지정하면 새로 들어온 최상위 노드를 이 이름의 그룹으로 묶습니다.
+            up_axis: 원본 FBX 의 업 축. 언리얼 FBX 익스포터는 보통 Y-up 으로
+                내보내므로 기본값 "y" 입니다. 결과가 90도 누워 있으면 "z" 로 재시도.
+            scale_factor: 임포트 스케일. Maya·언리얼 모두 cm 면 1.0.
+            import_mode: "add"(새로 추가) | "merge"(같은 이름에 병합) |
+                "exmerge"(존재하는 것만 갱신).
+        """
+        if not path:
+            raise ValueError("path 가 필요합니다.")
+        return conn.call("unreal.import_fbx", {
+            "path": path, "namespace": namespace, "group": group,
+            "up_axis": up_axis, "scale_factor": scale_factor,
+            "import_mode": import_mode})
+
     # ---------------------------------------------------------- 출력
 
     @mcp.tool()

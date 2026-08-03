@@ -187,7 +187,8 @@ def run():
         "maya_viewport_capture",
         "maya_unreal_check", "maya_unreal_check_skeleton", "maya_unreal_check_materials",
         "maya_unreal_prepare", "maya_unreal_cleanup_materials",
-        "maya_unreal_make_lods", "maya_unreal_make_collision", "maya_unreal_export_fbx",
+        "maya_unreal_make_lods", "maya_unreal_make_collision",
+        "maya_unreal_export_fbx", "maya_unreal_import_fbx",
     ])
     check("툴 등록: %d개 전부" % len(expected), names == expected,
           "누락/추가: %s" % sorted(set(names) ^ set(expected)))
