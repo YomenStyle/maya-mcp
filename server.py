@@ -303,6 +303,43 @@ def maya_unreal_check_skeleton(root: str | None = None,
 
 
 @mcp.tool()
+def maya_unreal_make_lods(objects: list[str] | None = None,
+                          keep_percent: list[float] | None = None,
+                          lod_group: bool = True,
+                          keep_borders: bool = True,
+                          keep_hard_edges: bool = True,
+                          keep_uv_borders: bool = True,
+                          dry_run: bool = False) -> str:
+    """원본을 복제해 LOD 메시를 만듭니다. 원본(LOD0)은 줄이지 않습니다.
+
+    **만든 뒤 반드시 maya_viewport_capture 로 눈으로 확인하세요.** 삼각형 수와
+    토폴로지 지표가 전부 정상이어도 실루엣이 깨져 있을 수 있습니다. 수치만 보고
+    "완료" 라고 보고하지 마세요.
+
+    감소율을 임의로 정하지 마세요. 실루엣이 무너지는 지점은 에셋마다 다릅니다.
+    사용자가 값을 주지 않았다면 기본값으로 만든 뒤 결과를 보여주고 조정 여부를
+    물어보세요. 캐릭터나 실루엣이 중요한 에셋은 첫 단계를 70~80 으로 올리는 편이
+    안전하고, 배경 소품은 더 공격적으로 줄여도 됩니다.
+
+    Args:
+        objects: 대상. 비우면 선택, 선택도 없으면 씬 전체 메시.
+        keep_percent: LOD1 부터 각 단계에서 **남길** 삼각형 비율(%). 원본 기준.
+            생략하면 [50, 25, 12]. 예) [75, 50, 25] 는 더 보수적인 감소.
+        lod_group: True 면 Maya LOD 그룹으로 묶습니다. 언리얼 FBX 임포터가
+            이걸 인식해 LOD 를 자동 구성합니다. 별개 파일로 관리하려면 False.
+        keep_borders: 메시 경계 보존. 열린 메시에서 끄면 형태가 무너집니다.
+        keep_hard_edges: 하드 엣지와 크리스 보존. 각진 에셋에 중요합니다.
+        keep_uv_borders: UV 경계 보존. 끄면 텍스처가 늘어납니다.
+        dry_run: True 면 예상 삼각형 수만 계산하고 씬은 건드리지 않습니다.
+    """
+    return _unreal("make_lods", objects=objects,
+                   keep_percent=keep_percent or [50, 25, 12],
+                   lod_group=lod_group, keep_borders=keep_borders,
+                   keep_hard_edges=keep_hard_edges,
+                   keep_uv_borders=keep_uv_borders, dry_run=dry_run)
+
+
+@mcp.tool()
 def maya_unreal_export_fbx(path: str,
                            objects: list[str] | None = None,
                            triangulate: bool = False,

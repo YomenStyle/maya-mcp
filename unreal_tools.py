@@ -497,7 +497,133 @@ def check_skeleton(root=None, primary_axis="x", tolerance_deg=1.0,
     }
 
 
-# ------------------------------------------------------------ 4. 익스포트
+# ------------------------------------------------------------ 4. LOD 생성
+
+def _tri_count(obj):
+    try:
+        return int(cmds.polyEvaluate(obj, triangle=True))
+    except Exception:
+        return 0
+
+
+def _strip_lod_suffix(name):
+    import re as _re
+    return _re.sub(r"_LOD\d+$", "", name)
+
+
+def make_lods(objects=None, keep_percent=(50, 25, 12), lod_group=True,
+              keep_borders=True, keep_hard_edges=True, keep_uv_borders=True,
+              preserve_topology=True, dry_run=False):
+    """원본을 복제해 LOD 메시를 만듭니다. 원본(LOD0)은 그대로 둡니다.
+
+    keep_percent: LOD1 부터 각 단계에서 **남길** 삼각형 비율(%). 원본 기준입니다.
+        (50, 25, 12) 이면 LOD1=50%, LOD2=25%, LOD3=12%.
+        기본값은 흔한 출발점일 뿐입니다. 실루엣이 중요한 에셋은 첫 단계를
+        70~80 으로 올리고, 배경 소품은 더 공격적으로 줄여도 됩니다.
+    lod_group: True 면 Maya LOD 그룹으로 묶습니다. 언리얼 FBX 임포터가 이걸
+        인식해 LOD 를 자동 구성합니다. False 면 이름만 붙은 별개 메시가 됩니다.
+
+    감소율은 자동으로 정하지 않습니다. 실루엣이 깨지는 지점은 에셋마다 달라서
+    사람이 결과를 보고 판단해야 합니다. 만든 뒤 뷰포트 캡처로 비교하세요.
+    """
+    levels = [float(p) for p in keep_percent]
+    for p in levels:
+        if not (0 < p < 100):
+            raise ValueError("keep_percent 는 0 초과 100 미만이어야 합니다 (받은 값: %s)" % p)
+
+    targets = _resolve(objects)
+    results = []
+
+    for obj in targets:
+        if not _shapes(obj):
+            continue
+        base = _strip_lod_suffix(_short(obj))
+        original_tris = _tri_count(obj)
+        entry = {
+            "source": _short(obj),
+            "base_name": base,
+            "lod0_tris": original_tris,
+            "lods": [],
+        }
+
+        if dry_run:
+            for i, keep in enumerate(levels, start=1):
+                entry["lods"].append({
+                    "name": "%s_LOD%d" % (base, i),
+                    "target_keep_percent": keep,
+                    "estimated_tris": int(round(original_tris * keep / 100.0)),
+                })
+            results.append(entry)
+            continue
+
+        # LOD0 = 원본. 이름만 맞춰줍니다.
+        lod0 = obj
+        if not _short(obj).endswith("_LOD0"):
+            lod0 = cmds.rename(obj, base + "_LOD0")
+        chain = [lod0]
+
+        for i, keep in enumerate(levels, start=1):
+            dup = cmds.duplicate(lod0, name="%s_LOD%d" % (base, i))[0]
+            # polyReduce 의 percentage 는 '제거할' 비율입니다. 남길 비율의 보수.
+            cmds.polyReduce(
+                dup,
+                version=1,                       # 신형 알고리즘. 구형보다 실루엣 보존이 낫습니다.
+                percentage=100.0 - keep,
+                preserveTopology=preserve_topology,
+                keepBorder=keep_borders,
+                keepMapBorder=keep_uv_borders,
+                keepColorBorder=keep_borders,
+                keepFaceGroupBorder=keep_borders,
+                keepHardEdge=keep_hard_edges,
+                keepCreaseEdge=keep_hard_edges,
+                keepQuadsWeight=1.0,
+                useVirtualSymmetry=0,
+                replaceOriginal=True,
+                constructionHistory=False,
+            )
+            actual = _tri_count(dup)
+            topo = _topology_issues(dup)
+            entry["lods"].append({
+                "name": _short(dup),
+                "target_keep_percent": keep,
+                "actual_tris": actual,
+                "actual_keep_percent": (round(actual * 100.0 / original_tris, 1)
+                                        if original_tris else None),
+                "ngons": topo["ngons"],
+                "nonmanifold": topo["nonmanifold_edges"] + topo["nonmanifold_verts"],
+            })
+            chain.append(dup)
+
+        if lod_group and len(chain) > 1:
+            saved = cmds.ls(selection=True, long=True) or []
+            try:
+                cmds.select(chain, replace=True)   # 선택 순서가 LOD 순서가 됩니다
+                mel.eval("LevelOfDetailGroup")
+                grp = (cmds.ls(selection=True, long=True) or [None])[0]
+                entry["lod_group"] = _short(grp) if grp else None
+            except Exception as exc:
+                entry["lod_group"] = None
+                entry["lod_group_error"] = str(exc)
+            finally:
+                if saved:
+                    cmds.select(saved, replace=True)
+                else:
+                    cmds.select(clear=True)
+
+        results.append(entry)
+
+    return {
+        "dry_run": dry_run,
+        "processed": len(results),
+        "keep_percent": levels,
+        "lod_group": lod_group,
+        "objects": results,
+        "note": ("LOD 는 수치만으로 판단할 수 없습니다. maya_viewport_capture 로 "
+                 "각 단계를 눈으로 비교하세요."),
+    }
+
+
+# ------------------------------------------------------------ 5. 익스포트
 
 def export_fbx(objects=None, path=None, smoothing_groups=True, tangents=True,
                triangulate=False, skins=False, blendshapes=False,

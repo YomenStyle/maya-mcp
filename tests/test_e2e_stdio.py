@@ -41,7 +41,7 @@ async def main():
     async with Client(S.mcp) as client:
         tools = await client.list_tools()
         names = sorted(t.name for t in tools.tools)
-        check("핸드셰이크 + 툴 목록", len(names) == 11, names)
+        check("핸드셰이크 + 툴 목록", len(names) == 12, names)
         check("maya_execute 노출됨", "maya_execute" in names, names)
         check("언리얼 L2 툴 노출됨",
               all(n in names for n in ("maya_unreal_check", "maya_unreal_prepare",

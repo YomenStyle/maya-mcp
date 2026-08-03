@@ -137,7 +137,7 @@ def run():
     expected = sorted(["maya_execute", "maya_search_commands", "maya_command_help",
                        "maya_viewport_capture", "maya_undo", "maya_scene_info",
                        "maya_ping",
-                       "maya_unreal_check", "maya_unreal_prepare", "maya_unreal_check_skeleton",
+                       "maya_unreal_check", "maya_unreal_prepare", "maya_unreal_check_skeleton", "maya_unreal_make_lods",
                        "maya_unreal_export_fbx"])
     check("툴 등록: %d개 전부" % len(expected), names == expected,
           "누락/추가: %s" % sorted(set(names) ^ set(expected)))
