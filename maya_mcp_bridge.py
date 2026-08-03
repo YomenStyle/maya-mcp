@@ -218,6 +218,19 @@ def _op_help(params):
     return {"name": name, "help": _clip(text, MAX_STDOUT)}
 
 
+def _pick_model_panel():
+    """캡처에 쓸 모델 패널을 고릅니다. 보이는 패널을 우선합니다."""
+    try:
+        visible = cmds.getPanel(visiblePanels=True) or []
+        for p in visible:
+            if cmds.getPanel(typeOf=p) == "modelPanel":
+                return p
+        panels = cmds.getPanel(type="modelPanel") or []
+        return panels[0] if panels else None
+    except Exception:
+        return None
+
+
 def _op_capture(params):
     """현재 뷰포트를 PNG 로 저장하고 경로를 돌려줍니다."""
     if cmds.about(q=True, batch=True):
@@ -226,16 +239,16 @@ def _op_capture(params):
     width = int(params.get("width", 960))
     height = int(params.get("height", 540))
     ornaments = bool(params.get("ornaments", False))
+    # offScreen=True 는 사용자의 뷰포트를 건드리지 않습니다. 이 환경(Maya 2022)에서는
+    # True/False 결과가 바이트 단위로 동일했지만, 드라이버에 따라 오프스크린 렌더가
+    # 빈 프레임을 내는 사례가 알려져 있어 끌 수 있게 남겨둡니다.
+    off_screen = bool(params.get("off_screen", True))
 
-    # 모델 패널에 포커스가 없으면 playblast 가 엉뚱한 패널을 잡습니다.
-    try:
-        focused = cmds.getPanel(withFocus=True)
-        if not focused or cmds.getPanel(typeOf=focused) != "modelPanel":
-            panels = cmds.getPanel(type="modelPanel") or []
-            if panels:
-                cmds.setFocus(panels[0])
-    except Exception:
-        pass
+    # 캡처할 모델 패널을 명시적으로 고릅니다. setFocus 에 의존하면
+    # 스크립트 에디터가 포커스를 쥐고 있을 때 백지가 나옵니다.
+    panel = _pick_model_panel()
+    if panel is None:
+        return {"error": "보이는 모델 패널이 없습니다. 뷰포트를 하나 열어두세요."}
 
     base = os.path.join(tempfile.gettempdir(), "mcp_capture")
     target = base + ".png"
@@ -247,7 +260,9 @@ def _op_capture(params):
 
     frame = cmds.currentTime(q=True)
     try:
+        cmds.refresh(force=True)          # 직전 편집을 화면에 반영시킨 뒤 캡처
         cmds.playblast(
+            editorPanelName=panel,
             frame=frame,
             format="image",
             compression="png",
@@ -256,7 +271,7 @@ def _op_capture(params):
             percent=100,
             quality=100,
             viewer=False,
-            offScreen=True,
+            offScreen=off_screen,
             showOrnaments=ornaments,
             forceOverwrite=True,
         )
@@ -402,6 +417,31 @@ def stop():
 
 def is_running():
     return _server is not None
+
+
+def status():
+    if _server is None:
+        return "[maya-mcp] 중지됨"
+    return "[maya-mcp] 대기 중: %s:%d" % (HOST, _server.server_address[1])
+
+
+def toggle(port=PORT):
+    """셸프 버튼용. 꺼져 있으면 켜고, 켜져 있으면 끕니다."""
+    if is_running():
+        stop()
+        state = False
+    else:
+        start(port)
+        state = True
+    try:
+        cmds.inViewMessage(
+            amg=("maya-mcp <hl>대기 중</hl> (%s:%d)" % (HOST, port)) if state
+                else "maya-mcp <hl>중지됨</hl>",
+            pos="midCenter", fade=True, fadeStayTime=1500,
+        )
+    except Exception:
+        pass
+    return state
 
 
 # ---------------------------------------------------------------- 플러그인 진입점

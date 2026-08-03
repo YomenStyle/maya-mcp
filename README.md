@@ -44,20 +44,43 @@ Maya의 한계가 아니라 그 서버들이 구현을 안 한 것뿐입니다. 
 
 ### 1. Maya 쪽 (한 번만)
 
-`maya_mcp_bridge.py` 를 Maya가 찾을 수 있는 곳에 두고, 스크립트 에디터(Python)에서:
+스크립트 에디터(**Python 탭**)에서 아래를 한 번 실행하면 끝입니다.
 
 ```python
-import sys
-sys.path.append(r"C:\path\to\maya-mcp")
-import maya_mcp_bridge
-maya_mcp_bridge.start()
+import sys; sys.path.append(r"C:\path\to\maya-mcp")
+import install_maya; install_maya.install()
 ```
 
-`[maya-mcp] 대기 중: 127.0.0.1:20777` 이 찍히면 준비된 것입니다.
-중지는 `maya_mcp_bridge.stop()`.
+두 가지가 설치됩니다.
 
-플러그인 매니저에서 로드해도 됩니다 (`initializePlugin` 이 `start()` 를 호출합니다).
-매번 자동으로 띄우려면 `userSetup.py` 에 위 코드를 넣으세요.
+- **자동 시작** — `~/Documents/maya/scripts/userSetup.py` 에 등록됩니다.
+  다음부터는 Maya 를 켜기만 하면 브릿지가 대기 상태가 됩니다.
+- **셸프 버튼** — `MCP` 셸프에 원버튼 시작/중지 토글이 생깁니다.
+  셸프 탭이 많으면 **맨 끝**에 추가되니 탭 바를 오른쪽으로 넘겨서 찾으세요.
+
+성공하면 출력창에 이렇게 찍힙니다:
+
+```
+[maya-mcp] 대기 중: 127.0.0.1:20777 (Maya 2022 / Python 3.7.7)
+```
+
+제거: `import install_maya; install_maya.uninstall()`
+
+<details>
+<summary>설치 없이 수동으로 띄우기</summary>
+
+```python
+import sys; sys.path.append(r"C:\path\to\maya-mcp")
+import maya_mcp_bridge; maya_mcp_bridge.start()   # 중지는 stop()
+```
+
+플러그인 매니저에서 `maya_mcp_bridge.py` 를 로드해도 됩니다
+(`initializePlugin` 이 `start()` 를 호출합니다).
+</details>
+
+> **코드를 수정한 뒤에는 Maya 를 재시작하세요.** `importlib.reload` 는 모듈 전역
+> (`_server`)을 초기화해 실행 중인 서버를 `stop()` 할 수 없게 만들고, 포트가 물린 채
+> `start()` 가 실패합니다. 셸프 버튼이 리로드를 하지 않는 이유이기도 합니다.
 
 ### 2. PC 쪽 (MCP 서버)
 
@@ -104,6 +127,9 @@ claude mcp add maya -- C:\path\to\maya-mcp\.venv\Scripts\python.exe C:\path\to\m
 
 # 3. MCP 엔드투엔드 (5개) — 실제 MCP 클라이언트로 핸드셰이크·툴 호출. Maya 불필요
 .venv\Scripts\python.exe tests/test_e2e_stdio.py
+
+# 4. GUI 스모크 — Maya 를 띄우고 브릿지를 start() 한 상태에서 실행
+.venv\Scripts\python.exe tests/smoke_gui.py
 ```
 
 1번은 `maya.standalone` 배치 모드에서 `_op_*` 함수를 직접 호출합니다. 소켓 계층을
