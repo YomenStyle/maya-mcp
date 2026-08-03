@@ -15,6 +15,7 @@ Maya 밖에서는 임포트되지 않습니다.
 import math
 import os
 
+import maya.api.OpenMaya as om
 import maya.cmds as cmds
 import maya.mel as mel
 
@@ -302,7 +303,201 @@ def prepare(objects=None, prefix=PREFIX_STATIC_MESH, freeze=True,
     }
 
 
-# ------------------------------------------------------------ 3. 익스포트
+# ------------------------------------------------------------ 3. 스켈레톤 감사
+
+AXES = {
+    "x": om.MVector(1, 0, 0), "y": om.MVector(0, 1, 0), "z": om.MVector(0, 0, 1),
+    "-x": om.MVector(-1, 0, 0), "-y": om.MVector(0, -1, 0), "-z": om.MVector(0, 0, -1),
+}
+
+SIDE_SUFFIXES = ("_l", "_r")          # 언리얼 표준. _L/_R, _left, Lf_ 등은 비표준.
+NONSTANDARD_SIDE = ("_L", "_R", "_left", "_right", "_Left", "_Right",
+                    "_lf", "_rt", "Lf_", "Rt_")
+
+
+def _joint_roots(root=None):
+    if root:
+        names = [root] if isinstance(root, str) else list(root)
+        found = []
+        for n in names:
+            found.extend(cmds.ls(n, type="joint", long=True) or [])
+        return sorted(set(found))
+    all_joints = cmds.ls(type="joint", long=True) or []
+    roots = []
+    for j in all_joints:
+        parent = cmds.listRelatives(j, parent=True, fullPath=True, type="joint")
+        if not parent:
+            roots.append(j)
+    return roots
+
+
+def _aim_deviation(joint, child, primary_axis):
+    """자식 방향이 조인트 로컬의 주축에서 몇 도 벗어나 있는지.
+
+    조인트 오리엔트가 어긋나면 리타겟과 IK 가 틀어지므로, 언리얼 파이프라인에서
+    가장 먼저 확인해야 하는 값입니다.
+    """
+    jp = om.MVector(*cmds.xform(joint, q=True, ws=True, translation=True))
+    cp = om.MVector(*cmds.xform(child, q=True, ws=True, translation=True))
+    delta = cp - jp
+    if delta.length() < 1e-6:
+        return None, None            # 길이 0 본
+    world_dir = delta.normal()
+
+    matrix = om.MMatrix(cmds.xform(joint, q=True, ws=True, matrix=True))
+    local_dir = (world_dir * matrix.inverse()).normal()
+
+    target = AXES[primary_axis]
+    dot = max(-1.0, min(1.0, local_dir * target))
+    deviation = math.degrees(math.acos(dot))
+
+    # 실제로는 어느 축에 가장 가까운지도 알려줍니다.
+    best, best_dot = None, -2.0
+    for name, vec in AXES.items():
+        d = local_dir * vec
+        if d > best_dot:
+            best, best_dot = name, d
+    return round(deviation, 2), best
+
+
+def check_skeleton(root=None, primary_axis="x", tolerance_deg=1.0,
+                   require_ssc_off=True):
+    """조인트 오리엔트와 언리얼 호환성을 감사합니다. 씬을 바꾸지 않습니다.
+
+    자동 수정은 제공하지 않습니다. 오리엔트를 다시 잡으면 이미 붙은 스킨 웨이트가
+    깨지므로, 무엇을 어떻게 고칠지는 사람이 판단해야 합니다.
+
+    root: 루트 조인트 이름. 비우면 씬의 모든 조인트 루트를 찾습니다.
+    primary_axis: 자식을 향해야 하는 축. Maya/언리얼 관행은 "x".
+    tolerance_deg: 이 각도를 넘으면 오리엔트 어긋남으로 봅니다.
+    """
+    if primary_axis not in AXES:
+        raise ValueError("primary_axis 는 %s 중 하나여야 합니다" % ", ".join(sorted(AXES)))
+
+    roots = _joint_roots(root)
+    scene_warnings = []
+    if not roots:
+        return {"error": "조인트를 찾지 못했습니다.", "roots": [], "joints": []}
+    if len(roots) > 1:
+        scene_warnings.append(
+            "루트 조인트가 %d개입니다. 언리얼은 스켈레탈 메시당 루트 하나를 요구합니다: %s"
+            % (len(roots), ", ".join(_short(r) for r in roots)))
+
+    for r in roots:
+        pos = cmds.xform(r, q=True, ws=True, translation=True)
+        if any(abs(v) > 1e-4 for v in pos):
+            scene_warnings.append(
+                "루트 '%s' 가 월드 원점에 있지 않습니다 %s. 언리얼에서 위치 오프셋이 생깁니다."
+                % (_short(r), [round(v, 3) for v in pos]))
+        if _short(r) != "root":
+            scene_warnings.append(
+                "루트 이름이 '%s' 입니다. UE5 마네킹 호환을 원하면 'root' 를 권합니다."
+                % _short(r))
+
+    joints = []
+    for r in roots:
+        joints.extend(cmds.ls(r, dag=True, type="joint", long=True) or [])
+    joints = sorted(set(joints))
+
+    names_short = set(_short(j) for j in joints)
+    report = []
+
+    for j in joints:
+        name = _short(j)
+        problems = []
+
+        rot = cmds.getAttr(j + ".rotate")[0]
+        if any(abs(v) > 1e-4 for v in rot):
+            problems.append("rotate 가 0이 아님 %s — 바인드 포즈가 더럽습니다. "
+                            "jointOrient 로 옮겨야 합니다" % [round(v, 3) for v in rot])
+
+        raxis = cmds.getAttr(j + ".rotateAxis")[0]
+        if any(abs(v) > 1e-4 for v in raxis):
+            problems.append("rotateAxis 가 0이 아님 %s — 숨은 회전이라 FBX 로 잘 안 넘어갑니다"
+                            % [round(v, 3) for v in raxis])
+
+        scl = cmds.getAttr(j + ".scale")[0]
+        if any(abs(v - 1.0) > 1e-4 for v in scl):
+            problems.append("scale 이 1이 아님 %s" % [round(v, 3) for v in scl])
+
+        # segmentScaleCompensate 는 Maya 기본값이 켜짐이라 조인트마다 찍으면 노이즈가
+        # 됩니다. 아래에서 씬 레벨로 한 번만 집계합니다.
+        ssc = cmds.getAttr(j + ".segmentScaleCompensate")
+
+        rorder = cmds.getAttr(j + ".rotateOrder")
+        children = cmds.listRelatives(j, children=True, type="joint", fullPath=True) or []
+
+        deviation, closest = (None, None)
+        if len(children) == 1:
+            deviation, closest = _aim_deviation(j, children[0], primary_axis)
+            if deviation is None:
+                problems.append("길이 0 본 — 자식이 같은 위치에 있습니다")
+            elif deviation > tolerance_deg:
+                problems.append(
+                    "오리엔트 어긋남: 자식 방향이 %s 축에서 %.2f° 벗어남 (가장 가까운 축: %s)"
+                    % (primary_axis, deviation, closest))
+        elif len(children) > 1:
+            # 분기 조인트는 어느 자식을 향해야 하는지 규칙이 없으므로 판정하지 않습니다.
+            problems.append("자식 %d개인 분기 조인트 — 오리엔트는 수동 확인 필요" % len(children))
+
+        for bad in NONSTANDARD_SIDE:
+            if bad in name:
+                problems.append("비표준 좌우 표기 '%s' — 언리얼 관행은 '_l' / '_r'" % bad)
+                break
+
+        for suffix, mirror in (("_l", "_r"), ("_r", "_l")):
+            if name.endswith(suffix):
+                partner = name[: -len(suffix)] + mirror
+                if partner not in names_short:
+                    problems.append("좌우 짝 없음: '%s' 를 찾을 수 없습니다" % partner)
+                break
+
+        report.append({
+            "joint": name,
+            "clean": not problems,
+            "problems": problems,
+            "children": len(children),
+            "aim_deviation_deg": deviation,
+            "closest_axis": closest,
+            "rotate": [round(v, 4) for v in rot],
+            "scale": [round(v, 4) for v in scl],
+            "segment_scale_compensate": bool(ssc),
+            "rotate_order": rorder,
+        })
+
+    orders = set(r["rotate_order"] for r in report)
+    if len(orders) > 1:
+        scene_warnings.append("rotateOrder 가 조인트마다 다릅니다 %s — 통일을 권합니다"
+                              % sorted(orders))
+
+    ssc_on = [r["joint"] for r in report if r["segment_scale_compensate"]]
+    if require_ssc_off and ssc_on:
+        scene_warnings.append(
+            "segmentScaleCompensate 가 %d/%d 조인트에서 켜져 있습니다 (Maya 기본값). "
+            "언리얼은 이 기능을 지원하지 않으므로, 리그에 스케일이 들어간다면 꺼야 "
+            "결과가 일치합니다. 스케일을 쓰지 않는다면 무시해도 됩니다."
+            % (len(ssc_on), len(report)))
+
+    # 편차가 실제로 문제인 것만 추립니다. 전부 0이면 보고할 게 없습니다.
+    worst = sorted((r for r in report
+                    if r["aim_deviation_deg"] is not None
+                    and r["aim_deviation_deg"] > tolerance_deg),
+                   key=lambda r: -r["aim_deviation_deg"])[:5]
+
+    return {
+        "roots": [_short(r) for r in roots],
+        "primary_axis": primary_axis,
+        "tolerance_deg": tolerance_deg,
+        "scene_warnings": scene_warnings,
+        "joint_count": len(report),
+        "clean": sum(1 for r in report if r["clean"]),
+        "worst_deviations": [{"joint": w["joint"], "deg": w["aim_deviation_deg"],
+                              "closest_axis": w["closest_axis"]} for w in worst],
+        "joints": report,
+    }
+
+
+# ------------------------------------------------------------ 4. 익스포트
 
 def export_fbx(objects=None, path=None, smoothing_groups=True, tangents=True,
                triangulate=False, skins=False, blendshapes=False,

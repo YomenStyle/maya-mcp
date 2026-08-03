@@ -276,6 +276,33 @@ def maya_unreal_prepare(objects: list[str] | None = None,
 
 
 @mcp.tool()
+def maya_unreal_check_skeleton(root: str | None = None,
+                               primary_axis: str = "x",
+                               tolerance_deg: float = 1.0) -> str:
+    """조인트 오리엔트와 언리얼 스켈레톤 호환성을 감사합니다. 씬을 바꾸지 않습니다.
+
+    스켈레탈 메시를 내보내기 전에 호출하세요. 오리엔트가 어긋나면 언리얼에서
+    리타겟과 IK 가 틀어지는데, 임포트 후에는 원인을 찾기 어렵습니다.
+
+    **이 툴은 자동 수정을 하지 않습니다.** 조인트를 다시 오리엔트하면 이미 붙은
+    스킨 웨이트가 깨지므로, 무엇을 어떻게 고칠지는 사람이 판단해야 합니다.
+    보고된 문제를 사용자에게 전달하고, 고치라는 지시를 받기 전까지는 손대지 마세요.
+
+    검사 항목: 자식 방향과 주축의 각도 편차, rotate/rotateAxis 잔여값, 조인트 스케일,
+    길이 0 본, 루트 개수와 위치, rotateOrder 불일치, segmentScaleCompensate,
+    좌우 네이밍(_l/_r) 규칙과 짝 존재 여부.
+
+    Args:
+        root: 루트 조인트 이름. 비우면 씬의 모든 조인트 루트를 감사합니다.
+        primary_axis: 자식을 향해야 하는 축. Maya/언리얼 관행은 "x".
+            "y", "z", "-x" 등도 지정할 수 있습니다.
+        tolerance_deg: 이 각도를 넘는 편차만 문제로 봅니다. 기본 1도.
+    """
+    return _unreal("check_skeleton", root=root, primary_axis=primary_axis,
+                   tolerance_deg=tolerance_deg)
+
+
+@mcp.tool()
 def maya_unreal_export_fbx(path: str,
                            objects: list[str] | None = None,
                            triangulate: bool = False,
