@@ -41,17 +41,26 @@ async def main():
     async with Client(S.mcp) as client:
         tools = await client.list_tools()
         names = sorted(t.name for t in tools.tools)
-        check("핸드셰이크 + 툴 목록", len(names) == 7, names)
+        check("핸드셰이크 + 툴 목록", len(names) == 10, names)
         check("maya_execute 노출됨", "maya_execute" in names, names)
+        check("언리얼 L2 툴 노출됨",
+              all(n in names for n in ("maya_unreal_check", "maya_unreal_prepare",
+                                       "maya_unreal_export_fbx")), names)
 
-        # 브릿지가 없는 상태이므로 연결 실패 안내가 와야 정상입니다.
+        # Maya 가 떠 있든 아니든 통과해야 합니다. 브릿지가 없으면 안내 문구가,
+        # 있으면 실제 결과가 옵니다. 둘 다 정상 응답입니다.
+        def sane(text):
+            return ("연결할 수 없습니다" in text) or ("--- 결과 ---" in text)
+
         res = await client.call_tool("maya_ping", {})
         text = _text_of(res)
         check("툴 호출 왕복", bool(text), res)
-        check("브릿지 없음 안내", "연결할 수 없습니다" in text, text[:200])
+        check("응답이 정상 형식 (연결 안내 또는 결과)", sane(text), text[:200])
+        print("      브릿지 상태: %s"
+              % ("미연결" if "연결할 수 없습니다" in text else "연결됨"))
 
         res = await client.call_tool("maya_execute", {"code": "cmds.ls()"})
-        check("인자 전달 왕복", "연결할 수 없습니다" in _text_of(res), _text_of(res)[:200])
+        check("인자 전달 왕복", sane(_text_of(res)), _text_of(res)[:200])
 
 
 if __name__ == "__main__":

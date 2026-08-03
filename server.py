@@ -205,6 +205,105 @@ def maya_undo(steps: int = 1) -> str:
         return str(exc)
 
 
+# ---------------------------------------------------------------- L2: 언리얼 파이프라인
+
+def _unreal(fn: str, **kwargs: Any) -> str:
+    """unreal_tools 의 함수를 Maya 안에서 호출합니다.
+
+    인자는 JSON 으로 실어보냅니다 — 소스 문자열을 조립하면 따옴표/역슬래시에서
+    깨지기 때문입니다.
+    """
+    payload = json.dumps({k: v for k, v in kwargs.items() if v is not None})
+    code = (
+        "import importlib, json, unreal_tools\n"
+        "importlib.reload(unreal_tools)\n"
+        "result = unreal_tools.%s(**json.loads(%r))\n" % (fn, payload)
+    )
+    try:
+        return _fmt(_call("execute", code=code, undo_chunk=(fn != "check")))
+    except BridgeError as exc:
+        return str(exc)
+
+
+@mcp.tool()
+def maya_unreal_check(objects: list[str] | None = None,
+                      prefix: str = "SM_") -> str:
+    """언리얼 익스포트 전 문제를 감사합니다. 씬을 전혀 바꾸지 않습니다.
+
+    정리나 익스포트를 하기 전에 항상 먼저 호출하세요. 무엇이 잘못됐는지 모르고
+    고치면 되돌릴 수 없는 문제(뒤집힌 노멀 등)를 덮어쓰게 됩니다.
+
+    검사 항목: 프리즈 안 된 트랜스폼, 음수 스케일, 남은 컨스트럭션 히스토리,
+    네이밍 규칙 위반, UV 누락, ngon, 논매니폴드/라미나 지오메트리, 씬 단위와 업 축.
+
+    Args:
+        objects: 대상 이름 목록(와일드카드 가능). 비우면 선택, 선택도 없으면 씬 전체 메시.
+        prefix: 기대하는 네이밍 접두사. 스태틱 메시 "SM_", 스켈레탈 메시 "SK_".
+    """
+    return _unreal("check", objects=objects, prefix=prefix)
+
+
+@mcp.tool()
+def maya_unreal_prepare(objects: list[str] | None = None,
+                        prefix: str = "SM_",
+                        freeze: bool = True,
+                        delete_history: bool = True,
+                        pivot: str = "center",
+                        rename: bool = True,
+                        dry_run: bool = False) -> str:
+    """언리얼 익스포트 전 정리를 한 번에 수행합니다 (프리즈·히스토리·피벗·네이밍).
+
+    먼저 maya_unreal_check 로 상태를 본 다음 호출하세요. 호출 전체가 하나의 undo
+    단위로 묶이므로 Ctrl+Z 한 번에 되돌릴 수 있습니다.
+
+    음수 스케일이 있으면 프리즈해도 노멀이 뒤집힌 채 남습니다. 이 툴은 경고만
+    하고 고치지 않습니다 — 어느 면을 뒤집을지는 사람이 판단해야 합니다.
+
+    Args:
+        objects: 대상 이름 목록. 비우면 선택, 선택도 없으면 씬 전체 메시.
+        prefix: 붙일 네이밍 접두사.
+        freeze: 트랜스폼 프리즈 여부.
+        delete_history: 컨스트럭션 히스토리 삭제 여부.
+        pivot: "center"(바운딩박스 중심) | "base"(바닥) | "origin"(월드 원점) | "keep".
+            바닥에 놓이는 프롭은 "base", 월드 기준 배치물은 "origin" 이 편합니다.
+        rename: 접두사 리네임 수행 여부.
+        dry_run: True 면 무엇을 할지만 보고하고 씬은 건드리지 않습니다.
+            파괴적 정리를 처음 돌릴 때 먼저 확인하는 용도로 쓰세요.
+    """
+    return _unreal("prepare", objects=objects, prefix=prefix, freeze=freeze,
+                   delete_history=delete_history, pivot=pivot,
+                   rename=rename, dry_run=dry_run)
+
+
+@mcp.tool()
+def maya_unreal_export_fbx(path: str,
+                           objects: list[str] | None = None,
+                           triangulate: bool = False,
+                           skins: bool = False,
+                           blendshapes: bool = False,
+                           animation: bool = False,
+                           up_axis: str = "y") -> str:
+    """언리얼용 설정으로 FBX 를 익스포트합니다.
+
+    스무딩 그룹과 탄젠트를 켜고, 서브디비전 결과·불필요한 업스트림 연결·카메라·
+    라이트는 제외합니다. 익스포트 전에 maya_unreal_prepare 를 먼저 돌리세요.
+
+    Args:
+        path: 저장 경로. 예) "D:/export/SM_Prop.fbx"
+        objects: 대상. 비우면 선택, 선택도 없으면 씬 전체 메시.
+        triangulate: 보통 False 로 두세요. 언리얼이 임포트 시 삼각화하며,
+            쿼드를 유지해야 나중에 수정이 쉽습니다.
+        skins: 스켈레탈 메시면 True.
+        blendshapes: 블렌드셰이프(모프 타깃)를 포함하려면 True.
+        animation: 애니메이션 클립을 함께 내보내려면 True.
+        up_axis: "y"(Maya 기본, 언리얼이 변환) 또는 "z".
+    """
+    return _unreal("export_fbx", path=path, objects=objects,
+                   triangulate=triangulate, skins=skins,
+                   blendshapes=blendshapes, animation=animation,
+                   up_axis=up_axis)
+
+
 # ---------------------------------------------------------------- 편의
 
 @mcp.tool()
