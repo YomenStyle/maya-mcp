@@ -11,26 +11,57 @@ Maya 2022의 내장 Python은 **3.7**이고, 공식 `mcp` 파이썬 SDK는 **3.1
 즉 MCP 서버 본체는 Maya 안에서 돌 수 없습니다. 그래서 두 조각으로 나뉩니다.
 
 ```
-Claude ─(stdio)─> server.py           PC 파이썬 3.10+ / FastMCP
+Claude ─(stdio)─> server.py           PC 파이썬 3.10+ / mcp SDK
                        │
                        │ TCP 127.0.0.1:20777, 길이 프리픽스 + JSON
                        ▼
                   maya_mcp_bridge.py  Maya 2022 내부 / Python 3.7 / 표준 라이브러리만
                        │ executeInMainThreadWithResult
                        ▼
-                    maya.cmds
+                    maya.cmds ← unreal_tools.py (L2 언리얼 파이프라인)
 ```
 
 이 경계 덕분에 Maya를 2024/2026으로 올려도 브릿지 파일 하나만 확인하면 됩니다.
 
-## 툴 구성
+## 툴 목록 (15개)
 
 | 계층 | 툴 | 역할 |
 |---|---|---|
 | L0 | `maya_execute` | 임의 Python 실행. **여기서 모든 기능이 나옵니다** |
-| L1 | `maya_search_commands`, `maya_command_help` | AI가 Maya API를 런타임에 탐색 |
-| L3 | `maya_undo`, `maya_viewport_capture` | 되돌리기 · 결과 눈으로 검증 |
-| — | `maya_scene_info`, `maya_ping` | 상태 파악 |
+| L1 | `maya_search_commands` | 이름으로 `maya.cmds` 명령 검색 |
+| L1 | `maya_command_help` | 명령의 플래그·시그니처 조회 |
+| L3 | `maya_undo` | 직전 작업 되돌리기 |
+| L3 | `maya_viewport_capture` | 뷰포트를 이미지로 받아 결과 검증 |
+| — | `maya_scene_info` | 단위·업축·프레임 범위·노드 개수 |
+| — | `maya_ping` | 연결·버전 확인 |
+
+### L2 — 언리얼 파이프라인 (`unreal_tools.py`)
+
+| 툴 | 성격 | 역할 |
+|---|---|---|
+| `maya_unreal_check` | 읽기 전용 | 프리즈·음수 스케일·히스토리·네이밍·UV·ngon·논매니폴드 감사 |
+| `maya_unreal_check_skeleton` | 읽기 전용 | 조인트 오리엔트 편차, rotate 잔여값, 루트·좌우 네이밍 감사 |
+| `maya_unreal_check_materials` | 읽기 전용 | 슬롯 수(=드로우 콜), 기본 머티리얼, 페이스 단위 할당, 미사용 SG |
+| `maya_unreal_prepare` | 변경 | 히스토리 삭제·프리즈·피벗·접두사 리네임 일괄 |
+| `maya_unreal_cleanup_materials` | 변경 | 미사용 셰이딩 그룹 삭제, `M_` 리네임 |
+| `maya_unreal_make_lods` | 생성 | LOD 메시 생성 + Maya LOD 그룹 |
+| `maya_unreal_make_collision` | 생성 | `UBX_`/`USP_`/`UCP_`/`UCX_` 콜리전 |
+| `maya_unreal_export_fbx` | 출력 | 언리얼 프리셋 FBX |
+
+**감사(읽기 전용)를 먼저 두는 구조입니다.** 보지 않고 고치면 되돌릴 수 없는 문제
+(뒤집힌 노멀 등)를 덮어쓰게 됩니다.
+
+자동화하지 않기로 한 것들 — 판단이 필요하기 때문입니다:
+
+- **음수 스케일 수정** — 프리즈해도 노멀이 뒤집힌 채 남습니다. 어느 면을 뒤집을지는 사람이 정합니다.
+- **조인트 재오리엔트** — 이미 붙은 스킨 웨이트가 깨집니다. 감사만 합니다.
+- **머티리얼 병합** — 어느 것을 남길지는 룩뎁 판단입니다.
+- **LOD 감소율 자동 결정** — 실루엣이 무너지는 지점은 에셋마다 다릅니다.
+
+> ⚠️ **`UCX_` 컨벡스 콜리전 제약** — Maya 2022 에는 컨벡스 헐 명령이 없습니다
+> (런타임 조사로 확인). `convex` 옵션은 원본을 줄인 사본일 뿐 볼록함이 보장되지
+> 않습니다. 대부분의 프롭은 `box`(`UBX_`)로 충분하고, 복잡한 형태는 언리얼
+> 스태틱 메시 에디터의 **Auto Convex Collision** 을 쓰는 편이 낫습니다.
 
 기존 서버 비교표에서 "Maya 2022에서는 undo와 뷰포트 캡처가 불가능"이라고 나오는 건
 Maya의 한계가 아니라 그 서버들이 구현을 안 한 것뿐입니다. 둘 다 2022에서 잘 됩니다.
@@ -113,6 +144,25 @@ Claude Code CLI 라면:
 ```bash
 claude mcp add maya -- C:\path\to\maya-mcp\.venv\Scripts\python.exe C:\path\to\maya-mcp\server.py
 ```
+
+## 언리얼 익스포트 워크플로
+
+```
+1. maya_unreal_check              지오메트리 문제 확인
+2. maya_unreal_check_materials    슬롯 수 확인
+3. maya_unreal_prepare            프리즈·히스토리·피벗·네이밍
+4. maya_unreal_cleanup_materials  미사용 셰이딩 그룹 정리
+5. maya_unreal_make_collision     UBX_ 콜리전 생성
+6. maya_unreal_make_lods          LOD 생성
+7. maya_viewport_capture          눈으로 검증          ← 건너뛰지 마세요
+8. maya_unreal_export_fbx         콜리전·LOD 포함 익스포트
+```
+
+7번이 핵심입니다. LOD 검증 중에 실제로 겪은 사례: 삼각형 수 10.3% 유지, ngon 0,
+논매니폴드 0 — 지표는 전부 정상이었는데 캡처해보니 **실루엣이 눈에 띄게 깨져
+있었습니다.** 수치만으로 품질을 판단할 수 없습니다.
+
+콜리전 메시는 원본과 **같은 FBX 에 함께** 익스포트해야 언리얼이 인식합니다.
 
 ## 테스트
 
