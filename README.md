@@ -67,6 +67,9 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+`mcp` 2.x(`MCPServer`)와 1.x(`FastMCP`) 양쪽을 지원합니다 — `server.py` 가 임포트
+시점에 알아서 고릅니다. 2.0.0 에서 검증했습니다.
+
 ### 3. 클라이언트 등록
 
 Claude Desktop / Claude Code 설정에 추가:
@@ -87,6 +90,27 @@ Claude Code CLI 라면:
 ```bash
 claude mcp add maya -- C:\path\to\maya-mcp\.venv\Scripts\python.exe C:\path\to\maya-mcp\server.py
 ```
+
+## 테스트
+
+세 개의 스위트가 있고, 전부 통과 상태입니다 (Maya 2022.x + Python 3.12.10 + `mcp` 2.0.0 검증).
+
+```bash
+# 1. Maya 쪽 로직 (31개) — Maya 의 Python 3.7 에서 실제로 돌립니다
+"C:\Program Files\Autodesk\Maya2022\bin\mayapy.exe" tests/test_bridge_mayapy.py
+
+# 2. 서버 전송 계층 (24개) — 목 브릿지 상대. Maya 불필요
+.venv\Scripts\python.exe tests/test_server_protocol.py
+
+# 3. MCP 엔드투엔드 (5개) — 실제 MCP 클라이언트로 핸드셰이크·툴 호출. Maya 불필요
+.venv\Scripts\python.exe tests/test_e2e_stdio.py
+```
+
+1번은 `maya.standalone` 배치 모드에서 `_op_*` 함수를 직접 호출합니다. 소켓 계층을
+여기서 테스트하지 않는 이유는, 배치 모드에는 idle 이벤트 루프가 없어
+`executeInMainThreadWithResult` 가 반환되지 않기 때문입니다. 프레이밍은 2번이
+목 브릿지로 검증합니다. **GUI 모드에서의 소켓 왕복과 뷰포트 캡처는 자동 테스트
+범위 밖이므로, Maya 를 띄워서 직접 확인하세요.**
 
 ## 환경 변수
 

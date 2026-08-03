@@ -21,19 +21,17 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-
-try:
-    from mcp.server.fastmcp import Image
-except ImportError:  # pragma: no cover - 구버전 SDK 폴백
-    Image = None  # type: ignore[assignment]
+try:                                                # mcp >= 2.0
+    from mcp.server.mcpserver import MCPServer as _Server, Image
+except ImportError:                                 # mcp 1.x (FastMCP 시절)
+    from mcp.server.fastmcp import FastMCP as _Server, Image  # type: ignore[no-redef]
 
 
 HOST = os.environ.get("MAYA_MCP_HOST", "127.0.0.1")
 PORT = int(os.environ.get("MAYA_MCP_PORT", "20777"))
 TIMEOUT = float(os.environ.get("MAYA_MCP_TIMEOUT", "180"))
 
-mcp = FastMCP("maya")
+mcp = _Server("maya")
 
 
 # ---------------------------------------------------------------- 전송
@@ -188,10 +186,7 @@ def maya_viewport_capture(width: int = 960, height: int = 540,
     if not path.exists():
         return f"캡처 파일을 찾을 수 없습니다: {path}"
 
-    data = path.read_bytes()
-    if Image is None:
-        return f"캡처 완료: {path} ({len(data)} bytes). 이 MCP SDK 버전은 이미지 반환을 지원하지 않습니다."
-    return Image(data=data, format="png")
+    return Image(data=path.read_bytes(), format="png")
 
 
 @mcp.tool()
