@@ -9,9 +9,10 @@ GUI 모드 스모크 테스트 — Maya 를 띄운 상태에서 실행합니다.
   2. playblast 뷰포트 캡처 (뷰포트가 있어야 함)
 
 주의: undo 를 실제로 호출합니다. **새 씬이나 스크래치 씬에서 돌리세요.**
-작업 중인 씬에서 돌리지 마세요.
 """
 
+import asyncio
+import inspect
 import os
 import struct
 import sys
@@ -19,10 +20,20 @@ import zlib
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import server as S
+from maya_mcp.connection import MayaBridgeError, MayaConnection
+from maya_mcp.server import build_server
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 PREFIX = "mcpSmoke_"
+
+conn = MayaConnection()
+_results = []
+
+
+def check(name, cond, detail=""):
+    _results.append((name, bool(cond), detail))
+    print("%s  %s%s" % ("PASS" if cond else "FAIL", name,
+                        ("\n      -> " + str(detail)) if (detail and not cond) else ""))
 
 
 def png_byte_variety(data):
@@ -45,30 +56,41 @@ def png_byte_variety(data):
     except zlib.error:
         return 0
 
-_results = []
+
+def call_tool(mcp, name, **arguments):
+    try:
+        result = mcp.call_tool(name, arguments)
+        return asyncio.run(result) if inspect.isawaitable(result) else result
+    except Exception as exc:
+        return exc
 
 
-def check(name, cond, detail=""):
-    _results.append((name, bool(cond), detail))
-    # 통과한 항목에 상세를 붙이면 실패처럼 읽힙니다. 실패했을 때만 출력합니다.
-    print("%s  %s%s" % ("PASS" if cond else "FAIL", name,
-                        ("\n      -> " + str(detail)) if (detail and not cond) else ""))
+def image_bytes(result):
+    import base64
+    for block in (getattr(result, "content", None) or []):
+        data = getattr(block, "data", None)
+        if data and getattr(block, "type", "") == "image":
+            return base64.b64decode(data)
+    return None
+
+
+def execute(code, undo_chunk=True):
+    return conn.call("script.execute", {"code": code, "undo_chunk": undo_chunk})
 
 
 def run():
     # --- 1. 연결 -------------------------------------------------------
     try:
-        ping = S._call("ping")
-    except S.BridgeError as exc:
+        info = conn.call("scene.ping")
+    except MayaBridgeError as exc:
         print("브릿지에 연결할 수 없습니다.\n%s" % exc)
-        print("\nMaya 스크립트 에디터(Python 탭)에서 먼저 실행하세요:")
+        print("\nMaya 셸프의 MCP 버튼을 누르거나, 스크립트 에디터에서 실행하세요:")
         print('    import sys; sys.path.append(r"%s")'
               % os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         print("    import maya_mcp_bridge; maya_mcp_bridge.start()")
         return
 
-    info = ping.get("value") or {}
-    check("소켓 왕복 (핵심: 메인 스레드 마샬링)", ping.get("ok") and info.get("maya_version"), info)
+    check("소켓 왕복 (핵심: 메인 스레드 마샬링)", bool(info.get("maya_version")), info)
     if info.get("batch"):
         print("\n배치 모드입니다. 이 스크립트는 GUI 모드에서 돌려야 의미가 있습니다.")
         return
@@ -76,30 +98,30 @@ def run():
           "Maya 에서 undo 가 꺼져 있으면 롤백이 불가능합니다.")
 
     # --- 2. 실행 -------------------------------------------------------
-    r = S._call("execute", code=(
+    r = execute(
         "cmds.polyCube(name='%sA')\n"
         "cmds.polySphere(name='%sB')\n"
-        "result = cmds.ls('%s*', type='transform')" % (PREFIX, PREFIX, PREFIX)
-    ))
+        "result = cmds.ls('%s*', type='transform')" % (PREFIX, PREFIX, PREFIX))
     check("execute: 오브젝트 2개 생성", r.get("ok") and len(r.get("value") or []) >= 2,
           r.get("error") or r.get("value"))
 
     # --- 3. undo 청크: 한 호출 = 한 단계 ---------------------------------
-    u = S._call("undo", steps=1)
-    check("undo 호출", (u.get("value") or {}).get("undone") == 1, u)
+    u = conn.call("script.undo", {"steps": 1})
+    check("undo 호출", u.get("undone") == 1, u)
 
-    left = S._call("execute", code="result = cmds.ls('%s*', type='transform')" % PREFIX,
-                   undo_chunk=False)
+    left = execute("result = cmds.ls('%s*', type='transform')" % PREFIX, undo_chunk=False)
     remaining = left.get("value") or []
-    check("undo 청크: 한 번에 둘 다 롤백", len(remaining) == 0,
-          "남아있음: %s" % remaining)
+    check("undo 청크: 한 번에 둘 다 롤백", len(remaining) == 0, "남아있음: %s" % remaining)
 
     # --- 4. 뷰포트 캡처 --------------------------------------------------
-    # 캡처가 '유효한 PNG' 인지만 보면 백지도 통과합니다. 씬 내용을 실제로 반영하는지
-    # 확인하려면 빈 씬과 오브젝트가 있는 씬의 캡처가 서로 달라야 합니다.
+    # '유효한 PNG' 검사만 하면 백지도 통과합니다. 씬 내용을 실제로 반영하는지는
+    # 빈 씬과 오브젝트가 있는 씬의 캡처가 서로 달라야 확인됩니다.
     def grab(label):
-        cap = S._call("capture", width=640, height=360)
-        val = cap.get("value") or {}
+        try:
+            val = conn.call("viewport.capture", {"width": 640, "height": 360})
+        except MayaBridgeError as exc:
+            check("뷰포트 캡처 (%s)" % label, False, str(exc))
+            return None
         if val.get("error"):
             check("뷰포트 캡처 (%s)" % label, False, val["error"])
             return None
@@ -109,15 +131,12 @@ def run():
             return None
         return open(path, "rb").read()
 
-    S._call("execute", undo_chunk=False,
-            code="cmds.delete(cmds.ls('%s*', type='transform') or []); result='clean'" % PREFIX)
+    execute("cmds.delete(cmds.ls('%s*', type='transform') or []); result='clean'" % PREFIX,
+            undo_chunk=False)
     empty = grab("빈 씬")
 
-    S._call("execute", undo_chunk=False, code=(
-        "cmds.polyCube(name='%sCap')\n"
-        "cmds.viewFit(all=True)\n"
-        "result = 'ok'" % PREFIX
-    ))
+    execute("cmds.polyCube(name='%sCap')\ncmds.viewFit(all=True)\nresult='ok'" % PREFIX,
+            undo_chunk=False)
     filled = grab("오브젝트 있음")
 
     if empty and filled:
@@ -128,15 +147,20 @@ def run():
               % (len(empty), png_byte_variety(empty),
                  len(filled), png_byte_variety(filled)))
 
-    S._call("execute", undo_chunk=False,
-            code="cmds.delete(cmds.ls('%s*', type='transform') or []); result='cleaned'" % PREFIX)
+    # --- 5. MCP 툴 레이어 ------------------------------------------------
+    mcp = build_server(conn)
 
-    # --- 5. MCP 툴 레이어로도 한 번 ---------------------------------------
-    out = S.maya_scene_info()
-    check("툴 레이어: scene_info", "결과" in out, out[:200])
+    res = call_tool(mcp, "maya_scene_info")
+    check("툴 레이어: scene_info", not isinstance(res, Exception), res)
 
-    img = S.maya_viewport_capture(width=640, height=360)
-    check("툴 레이어: 이미지 객체 반환", isinstance(img, S.Image), type(img).__name__)
+    res = call_tool(mcp, "maya_viewport_capture", width=640, height=360)
+    check("툴 레이어: 이미지 콘텐츠 반환", image_bytes(res) is not None, res)
+
+    res = call_tool(mcp, "maya_unreal_check", objects=["%s*" % PREFIX])
+    check("툴 레이어: unreal.check 왕복", not isinstance(res, Exception), res)
+
+    execute("cmds.delete(cmds.ls('%s*', type='transform') or []); result='cleaned'" % PREFIX,
+            undo_chunk=False)
 
 
 if __name__ == "__main__":

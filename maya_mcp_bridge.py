@@ -317,62 +317,140 @@ def _op_scene_info(params):
     }
 
 
-_OPS = {
-    "ping": _op_ping,
-    "execute": _op_execute,
-    "undo": _op_undo,
-    "search": _op_search,
-    "help": _op_help,
-    "capture": _op_capture,
-    "scene_info": _op_scene_info,
+# ---------------------------------------------------------------- 메서드 등록
+# unreal-mcp-bridge 와 맞춘 점 네임스페이스 규약입니다: "<도메인>.<동작>".
+
+def _unreal_method(fn_name):
+    """unreal_tools 의 함수를 메서드로 노출합니다.
+
+    호출마다 reload 하므로 unreal_tools.py 를 고쳐도 Maya 재시작이 필요 없습니다.
+    unreal_tools 는 모듈 전역 상태가 없어서 안전합니다.
+    """
+    def _invoke(params):
+        import importlib
+        import unreal_tools
+        importlib.reload(unreal_tools)
+        return getattr(unreal_tools, fn_name)(**params)
+    return _invoke
+
+
+# (핸들러, 씬을 변경하는가) — 변경하는 메서드는 undo 청크로 감쌉니다.
+_METHODS = {
+    "scene.ping":              (_op_ping, False),
+    "scene.info":              (_op_scene_info, False),
+    "script.execute":          (_op_execute, False),   # 자체적으로 청크를 관리합니다
+    "script.undo":             (_op_undo, False),
+    "inspect.search_commands": (_op_search, False),
+    "inspect.command_help":    (_op_help, False),
+    "viewport.capture":        (_op_capture, False),
+    "unreal.check":            (_unreal_method("check"), False),
+    "unreal.check_skeleton":   (_unreal_method("check_skeleton"), False),
+    "unreal.check_materials":  (_unreal_method("check_materials"), False),
+    "unreal.prepare":          (_unreal_method("prepare"), True),
+    "unreal.cleanup_materials": (_unreal_method("cleanup_materials"), True),
+    "unreal.make_lods":        (_unreal_method("make_lods"), True),
+    "unreal.make_collision":   (_unreal_method("make_collision"), True),
+    "unreal.export_fbx":       (_unreal_method("export_fbx"), False),
 }
 
 
-# ---------------------------------------------------------------- 디스패치
+# ---------------------------------------------------------------- JSON-RPC 2.0
 
-def _handle_in_main_thread(req):
-    op = req.get("op")
-    params = req.get("params") or {}
-    fn = _OPS.get(op)
-    if fn is None:
-        return {"ok": False, "error": "알 수 없는 op: %r (사용 가능: %s)"
-                                      % (op, ", ".join(sorted(_OPS)))}
+PARSE_ERROR = -32700
+INVALID_REQUEST = -32600
+METHOD_NOT_FOUND = -32601
+INVALID_PARAMS = -32602
+INTERNAL_ERROR = -32603
+
+
+def _ok(req_id, result):
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _err(req_id, code, message, data=None):
+    return {"jsonrpc": "2.0", "id": req_id,
+            "error": {"code": code, "message": message, "data": data}}
+
+
+def _handle_in_main_thread(method, params):
+    """메인 스레드에서 실행됩니다. (결과, 에러) 튜플을 돌려줍니다."""
+    entry = _METHODS.get(method)
+    if entry is None:
+        return None, (METHOD_NOT_FOUND, "알 수 없는 메서드: %r" % method,
+                      {"available": sorted(_METHODS)})
+    fn, mutates = entry
+
+    opened = False
+    if mutates and cmds.undoInfo(q=True, state=True):
+        cmds.undoInfo(openChunk=True, chunkName="mcp:%s" % method)
+        opened = True
     try:
-        result = fn(params)
-    except Exception:
-        return {"ok": False, "error": traceback.format_exc()}
-
-    # _op_execute 는 이미 ok/error 를 스스로 채웁니다.
-    if isinstance(result, dict) and "ok" in result:
-        return result
-    return {"ok": True, "value": result}
+        return fn(params), None
+    except TypeError as exc:
+        # 인자 이름이 틀렸을 때 JSON-RPC 규약대로 InvalidParams 로 구분합니다.
+        return None, (INVALID_PARAMS, str(exc), traceback.format_exc())
+    except Exception as exc:
+        return None, (INTERNAL_ERROR, str(exc), traceback.format_exc())
+    finally:
+        if opened:
+            try:
+                cmds.undoInfo(closeChunk=True)
+            except Exception:
+                pass
 
 
 class _Handler(socketserver.BaseRequestHandler):
     def handle(self):
+        req_id = None
         try:
             raw = _recv_msg(self.request)
             if raw is None:
                 return
             req = json.loads(raw.decode("utf-8"))
+        except ValueError as exc:
+            self._reply(_err(None, PARSE_ERROR, "JSON 파싱 실패", str(exc)))
+            return
         except Exception:
-            self._reply({"ok": False, "error": traceback.format_exc()})
+            self._reply(_err(None, INTERNAL_ERROR, "요청 수신 실패",
+                             traceback.format_exc()))
+            return
+
+        if not isinstance(req, dict) or not req.get("method"):
+            self._reply(_err(None, INVALID_REQUEST, "method 가 없습니다", req))
+            return
+
+        req_id = req.get("id")
+        method = req["method"]
+        params = req.get("params") or {}
+        if not isinstance(params, dict):
+            self._reply(_err(req_id, INVALID_PARAMS, "params 는 객체여야 합니다"))
             return
 
         try:
             # 여기가 핵심: Maya 호출을 메인 스레드로 넘깁니다.
-            resp = maya.utils.executeInMainThreadWithResult(
-                lambda: _handle_in_main_thread(req)
+            outcome = maya.utils.executeInMainThreadWithResult(
+                lambda: _handle_in_main_thread(method, params)
             )
         except Exception:
-            resp = {"ok": False, "error": traceback.format_exc()}
+            self._reply(_err(req_id, INTERNAL_ERROR, "메인 스레드 실행 실패",
+                             traceback.format_exc()))
+            return
 
-        if resp is None:
-            resp = {"ok": False, "error": "메인 스레드 실행이 결과를 반환하지 않았습니다."}
-        resp["id"] = req.get("id")
-        self._reply(resp)
+        if outcome is None:
+            self._reply(_err(req_id, INTERNAL_ERROR,
+                             "메인 스레드 실행이 결과를 반환하지 않았습니다"))
+            return
+
+        result, error = outcome
+        if error is not None:
+            code, message, data = error
+            self._reply(_err(req_id, code, message, data))
+        else:
+            self._reply(_ok(req_id, _jsonable(result)))
 
     def _reply(self, obj):
+        if obj.get("id") is None and "error" not in obj:
+            return                      # 알림(notification)에는 응답하지 않습니다
         try:
             _send_msg(self.request, json.dumps(obj, ensure_ascii=False).encode("utf-8"))
         except Exception:

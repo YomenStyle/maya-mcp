@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maya-mcp"
+version = "0.2.0"
+description = "MCP server for Autodesk Maya 2022+ with an Unreal Engine asset pipeline toolset"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = ["mcp>=1.2.0"]
+
+[project.scripts]
+maya-mcp = "maya_mcp.server:main"
+
+[project.urls]
+Homepage = "https://github.com/YomenStyle/maya-mcp"
+
+[tool.setuptools]
+# maya_mcp_bridge / unreal_tools 는 Maya 내부(Python 3.7)에서 도는 파일이라
+# 이 패키지에 포함하지 않습니다. Maya 쪽 설치는 install_maya.py 가 담당합니다.
+packages = ["maya_mcp", "maya_mcp.tools"]

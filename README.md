@@ -11,9 +11,10 @@ Maya 2022의 내장 Python은 **3.7**이고, 공식 `mcp` 파이썬 SDK는 **3.1
 즉 MCP 서버 본체는 Maya 안에서 돌 수 없습니다. 그래서 두 조각으로 나뉩니다.
 
 ```
-Claude ─(stdio)─> server.py           PC 파이썬 3.10+ / mcp SDK
+Claude ─(stdio)─> maya_mcp/           PC 파이썬 3.10+ / mcp SDK
                        │
-                       │ TCP 127.0.0.1:20777, 길이 프리픽스 + JSON
+                       │ TCP 127.0.0.1:20777
+                       │ JSON-RPC 2.0 · 4바이트 길이 프리픽스
                        ▼
                   maya_mcp_bridge.py  Maya 2022 내부 / Python 3.7 / 표준 라이브러리만
                        │ executeInMainThreadWithResult
@@ -22,6 +23,37 @@ Claude ─(stdio)─> server.py           PC 파이썬 3.10+ / mcp SDK
 ```
 
 이 경계 덕분에 Maya를 2024/2026으로 올려도 브릿지 파일 하나만 확인하면 됩니다.
+
+### 자매 프로젝트와의 정렬
+
+[unreal-mcp-bridge](https://github.com/YomenStyle/unreal-mcp-bridge) 와 규약을 맞췄습니다.
+
+| | 공통 |
+|---|---|
+| 메시지 | JSON-RPC 2.0 (`method` / `params` / `result` / `error`) |
+| 에러 코드 | 표준 (-32700 ~ -32603) |
+| 메서드명 | `<도메인>.<동작>` 점 네임스페이스 |
+| 구조 | 패키지 + `tools/*.py` + `register_*_tools(mcp, conn)` |
+| 스레드 | 워커 스레드 수신 → 메인/게임 스레드 디스패치 |
+
+**의도적으로 다른 것 하나** — 프레이밍. 저쪽은 개행 구분 + 64KB 제한, 이쪽은
+4바이트 길이 프리픽스에 제한 없음입니다. Maya 는 씬 덤프처럼 큰 응답이 흔해
+(`cmds.ls()` 한 번에도 64KB를 넘길 수 있습니다) 64KB 제한을 쓸 수 없습니다.
+자세한 내용은 [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
+### 파일 구조
+
+```
+maya_mcp/              PC 쪽 (Python 3.10+)
+  config.py            MMCP_* 환경변수
+  connection.py        JSON-RPC 클라이언트
+  server.py            서버 조립 (build_server)
+  tools/               script · scene · inspection · viewport · unreal
+maya_mcp_bridge.py     Maya 내부 (Python 3.7, 표준 라이브러리만)
+unreal_tools.py        Maya 내부, 언리얼 파이프라인 구현
+install_maya.py        Maya 쪽 원버튼 설치
+server.py              엔트리 포인트 (기존 MCP 등록 경로 유지용)
+```
 
 ## 툴 목록 (15개)
 
@@ -118,8 +150,10 @@ import maya_mcp_bridge; maya_mcp_bridge.start()   # 중지는 stop()
 ```bash
 python -m venv .venv
 .venv\Scripts\activate        # macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .              # 또는: pip install -r requirements.txt
 ```
+
+`pip install -e .` 로 설치하면 `maya-mcp` 명령으로도 실행할 수 있습니다.
 
 `mcp` 2.x(`MCPServer`)와 1.x(`FastMCP`) 양쪽을 지원합니다 — `server.py` 가 임포트
 시점에 알아서 고릅니다. 2.0.0 에서 검증했습니다.
@@ -192,9 +226,12 @@ claude mcp add maya -- C:\path\to\maya-mcp\.venv\Scripts\python.exe C:\path\to\m
 
 | 변수 | 기본값 | 설명 |
 |---|---|---|
-| `MAYA_MCP_HOST` | `127.0.0.1` | 브릿지 호스트 |
-| `MAYA_MCP_PORT` | `20777` | 브릿지 포트 |
-| `MAYA_MCP_TIMEOUT` | `180` | 요청 타임아웃(초). 무거운 작업이 많으면 늘리세요 |
+| `MMCP_HOST` | `127.0.0.1` | 브릿지 호스트 |
+| `MMCP_PORT` | `20777` | 브릿지 포트 |
+| `MMCP_TIMEOUT` | `180` | 요청 타임아웃(초). 무거운 작업이 많으면 늘리세요 |
+
+접두사는 unreal-mcp-bridge 의 `UMCP_` 와 맞춘 것입니다. 예전 `MAYA_MCP_*` 도
+계속 인식하지만 `MMCP_*` 가 우선합니다.
 
 ## `maya_execute` 반환 규약
 

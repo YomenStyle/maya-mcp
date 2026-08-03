@@ -36,9 +36,9 @@ def _text_of(result):
 
 
 async def main():
-    import server as S  # 인프로세스로 붙습니다 (별도 프로세스 스폰 불필요).
+    from maya_mcp.server import build_server  # 인프로세스로 붙습니다.
 
-    async with Client(S.mcp) as client:
+    async with Client(build_server()) as client:
         tools = await client.list_tools()
         names = sorted(t.name for t in tools.tools)
         check("핸드셰이크 + 툴 목록", len(names) == 15, names)
@@ -47,20 +47,25 @@ async def main():
               all(n in names for n in ("maya_unreal_check", "maya_unreal_prepare",
                                        "maya_unreal_export_fbx")), names)
 
-        # Maya 가 떠 있든 아니든 통과해야 합니다. 브릿지가 없으면 안내 문구가,
-        # 있으면 실제 결과가 옵니다. 둘 다 정상 응답입니다.
-        def sane(text):
-            return ("연결할 수 없습니다" in text) or ("--- 결과 ---" in text)
+        # Maya 가 떠 있든 아니든 통과해야 합니다. 브릿지가 없으면 연결 실패가
+        # 툴 에러로, 있으면 실제 결과가 옵니다. 둘 다 정상 동작입니다.
+        def sane(res):
+            text = _text_of(res)
+            if "연결할 수 없습니다" in text:
+                return True, "미연결"
+            if getattr(res, "isError", False):
+                return False, text[:200]
+            return True, "연결됨"
 
         res = await client.call_tool("maya_ping", {})
-        text = _text_of(res)
-        check("툴 호출 왕복", bool(text), res)
-        check("응답이 정상 형식 (연결 안내 또는 결과)", sane(text), text[:200])
-        print("      브릿지 상태: %s"
-              % ("미연결" if "연결할 수 없습니다" in text else "연결됨"))
+        ok, state = sane(res)
+        check("툴 호출 왕복", bool(_text_of(res)) or not getattr(res, "isError", False), res)
+        check("응답이 정상 형식 (연결 안내 또는 결과)", ok, state)
+        print("      브릿지 상태: %s" % state)
 
         res = await client.call_tool("maya_execute", {"code": "cmds.ls()"})
-        check("인자 전달 왕복", sane(_text_of(res)), _text_of(res)[:200])
+        ok, state = sane(res)
+        check("인자 전달 왕복", ok, state)
 
 
 if __name__ == "__main__":

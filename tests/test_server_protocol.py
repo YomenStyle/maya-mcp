@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
-"""
-server.py 의 전송 계층과 툴 등록 테스트. PC 파이썬(3.10+)으로 실행합니다.
+"""JSON-RPC 전송 계층과 툴 등록 테스트. PC 파이썬(3.10+)으로 실행합니다.
 
     python tests/test_server_protocol.py
 
 Maya 없이 동작합니다. 브릿지와 동일한 와이어 프로토콜(4바이트 빅엔디안 길이
-프리픽스 + UTF-8 JSON)을 말하는 목 서버를 띄워서, server.py 가 프레이밍·에러
-처리·응답 포매팅을 제대로 하는지 검증합니다.
+프리픽스 + UTF-8 JSON-RPC 2.0)을 말하는 목 서버를 띄워서, 클라이언트가 요청을
+제대로 만들고 응답·에러를 제대로 처리하는지 검증합니다.
 """
 
 import asyncio
@@ -23,6 +22,9 @@ import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from maya_mcp.connection import MayaBridgeError, MayaConnection
+from maya_mcp.server import build_server
+
 # 1x1 투명 PNG
 _PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQ"
@@ -30,6 +32,7 @@ _PNG = base64.b64decode(
 )
 
 _results = []
+_seen_requests = []
 
 
 def check(name, cond, detail=""):
@@ -46,8 +49,8 @@ class _MockHandler(socketserver.BaseRequestHandler):
         if header is None:
             return
         (length,) = struct.unpack(">I", header)
-        raw = self._recv(length)
-        req = json.loads(raw.decode("utf-8"))
+        req = json.loads(self._recv(length).decode("utf-8"))
+        _seen_requests.append(req)
         resp = self.server.responder(req)
         payload = json.dumps(resp, ensure_ascii=False).encode("utf-8")
         self.request.sendall(struct.pack(">I", len(payload)) + payload)
@@ -85,126 +88,197 @@ def free_port():
 # ------------------------------------------------------------ 응답 정의
 
 CAPTURE_PATH = os.path.join(tempfile.gettempdir(), "mcp_test_capture.png")
-
 BIG_TEXT = "가나다라마바사" * 20000          # ≈ 420KB UTF-8 → 다중 recv 필요
 
 
+def _result(req, value):
+    return {"jsonrpc": "2.0", "id": req.get("id"), "result": value}
+
+
+def _error(req, code, message, data=None):
+    return {"jsonrpc": "2.0", "id": req.get("id"),
+            "error": {"code": code, "message": message, "data": data}}
+
+
 def responder(req):
-    op = req.get("op")
+    method = req.get("method")
     params = req.get("params") or {}
-    if op == "ping":
-        return {"ok": True, "value": {"maya_version": "2022", "undo_enabled": True}}
-    if op == "execute":
+
+    if method == "scene.ping":
+        return _result(req, {"maya_version": "2022", "undo_enabled": True})
+    if method == "scene.info":
+        return _result(req, {"scene": "<untitled>", "counts": {"mesh": 3}})
+    if method == "script.execute":
         code = params.get("code", "")
         if code == "BOOM":
-            return {"ok": False, "error": "Traceback ...\nValueError: 터짐"}
-        if code == "WARN":
-            return {"ok": True, "value": None, "stdout": "",
-                    "warning": "Maya 의 undo 가 꺼져 있습니다."}
+            return _error(req, -32603, "실행 중 예외", "Traceback ...\nValueError: 터짐")
         if code == "BIG":
-            return {"ok": True, "value": BIG_TEXT, "stdout": ""}
-        return {"ok": True, "value": [1, 2, 3], "stdout": "출력됨\n"}
-    if op == "undo":
-        return {"ok": True, "value": {"undone": params.get("steps", 1)}}
-    if op == "search":
-        return {"ok": True, "value": {"total": 2, "commands": ["polyBevel", "polyCube"]}}
-    if op == "help":
-        return {"ok": True, "value": {"name": params.get("name"), "help": "Flags: -offset"}}
-    if op == "capture":
-        return {"ok": True, "value": {"path": CAPTURE_PATH, "width": 960, "height": 540}}
-    if op == "scene_info":
-        return {"ok": True, "value": {"scene": "<untitled>", "counts": {"mesh": 3}}}
-    return {"ok": False, "error": "알 수 없는 op"}
+            return _result(req, {"ok": True, "value": BIG_TEXT, "stdout": ""})
+        return _result(req, {"ok": True, "value": [1, 2, 3], "stdout": "출력됨\n"})
+    if method == "script.undo":
+        return _result(req, {"undone": params.get("steps", 1)})
+    if method == "inspect.search_commands":
+        return _result(req, {"total": 2, "commands": ["polyBevel", "polyCube"]})
+    if method == "inspect.command_help":
+        return _result(req, {"name": params.get("name"), "help": "Flags: -offset"})
+    if method == "viewport.capture":
+        return _result(req, {"path": CAPTURE_PATH, "width": 960, "height": 540})
+    if method.startswith("unreal."):
+        return _result(req, {"method": method, "params": params})
+    return _error(req, -32601, "알 수 없는 메서드: %r" % method)
+
+
+def list_tools(mcp):
+    tools = mcp.list_tools()
+    return asyncio.run(tools) if inspect.isawaitable(tools) else tools
+
+
+class _ToolError:
+    """인프로세스 call_tool 은 툴 예외를 그대로 올립니다. 와이어 프로토콜에서는
+    같은 상황이 isError 결과로 변환되므로, 테스트에서는 둘을 같게 취급합니다."""
+
+    def __init__(self, exc):
+        self.exc = exc
+
+    def __repr__(self):
+        return "ToolError(%s: %s)" % (type(self.exc).__name__, self.exc)
+
+
+def call_tool(mcp, name, **arguments):
+    """공개 API 로 툴을 호출합니다. 내부 속성에 의존하지 않습니다."""
+    try:
+        result = mcp.call_tool(name, arguments)
+        return asyncio.run(result) if inspect.isawaitable(result) else result
+    except Exception as exc:
+        return _ToolError(exc)
+
+
+def is_error(result):
+    if isinstance(result, _ToolError):
+        return True
+    return bool(getattr(result, "isError", False) or getattr(result, "is_error", False))
+
+
+def image_bytes(result):
+    """CallToolResult 안의 이미지 콘텐츠를 원본 바이트로 되돌립니다."""
+    for block in (getattr(result, "content", None) or []):
+        data = getattr(block, "data", None)
+        if data and getattr(block, "type", "") == "image":
+            return base64.b64decode(data)
+    return None
 
 
 # ------------------------------------------------------------ 테스트
 
 def run():
     srv, port = start_mock(responder)
-    os.environ["MAYA_MCP_PORT"] = str(port)
-    os.environ["MAYA_MCP_TIMEOUT"] = "15"
+    conn = MayaConnection(port=port, timeout=15)
+    mcp = build_server(conn)
 
-    import server as S
-    check("import: MCP 서버 생성", S.mcp is not None)
-    check("import: Image 헬퍼 존재", S.Image is not None)
-
-    # --- 툴 등록 확인 (SDK 가 시그니처/독스트링을 읽었는지) -------------
-    # mcp 2.x 는 동기, 1.x(FastMCP)는 코루틴을 돌려줍니다.
-    tools = S.mcp.list_tools()
+    # --- 툴 등록 ------------------------------------------------------
+    tools = mcp.list_tools()
     if inspect.isawaitable(tools):
         tools = asyncio.run(tools)
     names = sorted(t.name for t in tools)
-    expected = sorted(["maya_execute", "maya_search_commands", "maya_command_help",
-                       "maya_viewport_capture", "maya_undo", "maya_scene_info",
-                       "maya_ping",
-                       "maya_unreal_check", "maya_unreal_prepare", "maya_unreal_check_skeleton", "maya_unreal_make_lods", "maya_unreal_check_materials", "maya_unreal_cleanup_materials", "maya_unreal_make_collision",
-                       "maya_unreal_export_fbx"])
+    expected = sorted([
+        "maya_execute", "maya_undo",
+        "maya_scene_info", "maya_ping",
+        "maya_search_commands", "maya_command_help",
+        "maya_viewport_capture",
+        "maya_unreal_check", "maya_unreal_check_skeleton", "maya_unreal_check_materials",
+        "maya_unreal_prepare", "maya_unreal_cleanup_materials",
+        "maya_unreal_make_lods", "maya_unreal_make_collision", "maya_unreal_export_fbx",
+    ])
     check("툴 등록: %d개 전부" % len(expected), names == expected,
           "누락/추가: %s" % sorted(set(names) ^ set(expected)))
     check("툴 등록: 설명 비어있지 않음",
           all((t.description or "").strip() for t in tools),
           [t.name for t in tools if not (t.description or "").strip()])
-    ex = [t for t in tools if t.name == "maya_execute"][0]
-    # mcp 2.x 는 input_schema, 1.x 는 inputSchema.
-    schema = getattr(ex, "input_schema", None) or getattr(ex, "inputSchema", None) or {}
-    props = schema.get("properties", {})
-    check("툴 스키마: maya_execute 인자 2개", set(props) == {"code", "undo_chunk"}, props)
 
-    # --- 정상 실행 -----------------------------------------------------
-    out = S.maya_execute("cmds.ls()")
-    check("execute: 결과 섹션", "--- 결과 ---" in out, out)
-    check("execute: stdout 섹션", "출력됨" in out, out)
+    # --- JSON-RPC 요청 형식 ---------------------------------------------
+    _seen_requests.clear()
+    conn.call("scene.ping")
+    req = _seen_requests[-1]
+    check("JSON-RPC: jsonrpc 필드", req.get("jsonrpc") == "2.0", req)
+    check("JSON-RPC: id 부여", req.get("id") is not None, req)
+    check("JSON-RPC: 점 네임스페이스 메서드", req.get("method") == "scene.ping", req)
+    check("JSON-RPC: id 는 호출마다 증가",
+          conn.call("scene.ping") is not None and _seen_requests[-1]["id"] > req["id"],
+          [r["id"] for r in _seen_requests])
 
-    # --- 에러 전달 -----------------------------------------------------
-    out = S.maya_execute("BOOM")
-    check("execute(실패): 실패 표시", "실패했습니다" in out, out)
-    check("execute(실패): 트레이스백 전달", "ValueError" in out, out)
+    # --- None 인자는 params 에서 제거 -------------------------------------
+    _seen_requests.clear()
+    conn.call("unreal.check", {"objects": None, "prefix": "SM_"})
+    check("None 인자 제거", _seen_requests[-1]["params"] == {"prefix": "SM_"},
+          _seen_requests[-1]["params"])
 
-    # --- 경고 전달 -----------------------------------------------------
-    out = S.maya_execute("WARN")
-    check("execute(경고): 경고 전달", "경고:" in out, out)
+    # --- result 반환 ---------------------------------------------------
+    out = conn.call("script.execute", {"code": "cmds.ls()"})
+    check("result 를 dict 로 반환", isinstance(out, dict) and out.get("ok") is True, out)
+    check("stdout 전달", out.get("stdout") == "출력됨\n", out)
 
-    # --- 큰 페이로드 (프레이밍 검증) --------------------------------------
-    # 한 번의 recv 로 안 들어오는 크기여야 _recv_exact 의 루프가 검증됩니다.
+    # --- error 는 예외로 -------------------------------------------------
+    try:
+        conn.call("script.execute", {"code": "BOOM"})
+        check("error 는 예외로 변환", False, "예외가 발생하지 않았습니다")
+    except MayaBridgeError as exc:
+        check("error 는 예외로 변환", True)
+        check("에러 코드 보존", exc.code == -32603, exc.code)
+        check("에러 data(트레이스백) 보존", "ValueError" in str(exc.data), exc.data)
+
+    try:
+        conn.call("nope.nothing")
+        check("MethodNotFound 전달", False, "예외가 발생하지 않았습니다")
+    except MayaBridgeError as exc:
+        check("MethodNotFound 전달", exc.code == -32601, exc.code)
+
+    # --- 프레이밍 ------------------------------------------------------
     wire_bytes = len(BIG_TEXT.encode("utf-8"))
-    out = S.maya_execute("BIG")
     check("프레이밍: 다중 recv 필요한 크기", wire_bytes > 400000, "%d bytes" % wire_bytes)
-    check("프레이밍: 대용량 응답 무손실 (전체 일치)", BIG_TEXT in out,
-          "출력 %d자 / 기대 %d자" % (len(out), len(BIG_TEXT)))
+    big = conn.call("script.execute", {"code": "BIG"})
+    check("프레이밍: 대용량 응답 무손실 (전체 일치)", big.get("value") == BIG_TEXT,
+          "길이 %d / 기대 %d" % (len(big.get("value") or ""), len(BIG_TEXT)))
 
-    # --- 나머지 툴 -----------------------------------------------------
-    check("undo", '"undone": 3' in S.maya_undo(3), S.maya_undo(3))
-    check("search", "polyBevel" in S.maya_search_commands("bevel"), "")
-    check("command_help", "-offset" in S.maya_command_help("polyBevel"), "")
-    check("scene_info", '"mesh": 3' in S.maya_scene_info(), "")
-    check("ping", "2022" in S.maya_ping(), "")
+    # --- 툴 계층 (공개 call_tool 경로) --------------------------------------
+    _seen_requests.clear()
+    res = call_tool(mcp, "maya_execute", code="cmds.ls()")
+    check("maya_execute: 성공", not is_error(res), res)
+    check("maya_execute: script.execute 호출",
+          _seen_requests[-1]["method"] == "script.execute", _seen_requests[-1])
 
-    # --- 캡처: 이미지 반환 ------------------------------------------------
+    res = call_tool(mcp, "maya_execute", code="   ")
+    check("maya_execute: 빈 코드 거부", is_error(res), res)
+
+    _seen_requests.clear()
+    call_tool(mcp, "maya_unreal_check", objects=["a*"], prefix="SM_")
+    check("언리얼 툴이 unreal.* 메서드 호출",
+          _seen_requests[-1]["method"] == "unreal.check", _seen_requests[-1])
+
+    _seen_requests.clear()
+    call_tool(mcp, "maya_unreal_make_lods")
+    sent = _seen_requests[-1]["params"]
+    check("make_lods 기본 감소율 전달", sent.get("keep_percent") == [50, 25, 12], sent)
+
+    # --- 캡처: MCP 이미지 콘텐츠로 왕복 -------------------------------------
     with open(CAPTURE_PATH, "wb") as fh:
         fh.write(_PNG)
-    img = S.maya_viewport_capture()
-    check("capture: Image 객체 반환", isinstance(img, S.Image), type(img).__name__)
-    if isinstance(img, S.Image):
-        check("capture: PNG 바이트 그대로", getattr(img, "data", None) == _PNG,
-              len(getattr(img, "data", b"") or b""))
+    res = call_tool(mcp, "maya_viewport_capture")
+    check("capture: 이미지 콘텐츠 반환", image_bytes(res) is not None, res)
+    check("capture: PNG 바이트 그대로", image_bytes(res) == _PNG,
+          len(image_bytes(res) or b""))
 
-    # --- 캡처: 파일 없음 ---------------------------------------------------
     os.remove(CAPTURE_PATH)
-    out = S.maya_viewport_capture()
-    check("capture(파일없음): 문자열로 안내", isinstance(out, str) and "찾을 수 없" in out, out)
+    res = call_tool(mcp, "maya_viewport_capture")
+    check("capture(파일없음): 툴 에러로 보고", is_error(res), res)
 
     # --- 연결 실패 안내 --------------------------------------------------
-    dead = free_port()
-    S.PORT = dead
-    out = S.maya_execute("cmds.ls()")
-    check("연결실패: 원인 안내", "연결할 수 없습니다" in out, out)
-    check("연결실패: 해결 방법 안내", "maya_mcp_bridge.start()" in out, out)
-    S.PORT = port
-
-    # --- _fmt 엣지 케이스 -------------------------------------------------
-    check("_fmt: 빈 응답", "완료했습니다" in S._fmt({"ok": True}), S._fmt({"ok": True}))
-    check("_fmt: 값 0 도 출력", "--- 결과 ---" in S._fmt({"ok": True, "value": 0}),
-          S._fmt({"ok": True, "value": 0}))
+    dead = MayaConnection(port=free_port(), timeout=3)
+    try:
+        dead.call("scene.ping")
+        check("연결실패: 예외", False, "예외 없음")
+    except MayaBridgeError as exc:
+        check("연결실패: 원인 안내", "연결할 수 없습니다" in str(exc), str(exc))
+        check("연결실패: 해결 방법 안내", "maya_mcp_bridge.start()" in str(exc), str(exc))
 
     srv.shutdown()
 
@@ -214,10 +288,10 @@ if __name__ == "__main__":
     try:
         run()
     except Exception:
-        # finally 에서 곧장 sys.exit 하면 트레이스백이 통째로 사라집니다.
         import traceback
         traceback.print_exc()
         crashed = True
+
     failed = [n for n, ok, _ in _results if not ok]
     print("\n%d개 중 %d개 통과" % (len(_results), len(_results) - len(failed)))
     if failed:
