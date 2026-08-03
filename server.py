@@ -340,6 +340,74 @@ def maya_unreal_make_lods(objects: list[str] | None = None,
 
 
 @mcp.tool()
+def maya_unreal_check_materials(objects: list[str] | None = None,
+                                prefix: str = "M_") -> str:
+    """머티리얼 슬롯을 감사합니다. 씬을 바꾸지 않습니다.
+
+    언리얼에서 머티리얼 슬롯 하나는 드로우 콜 하나입니다. 메시당 슬롯 수가
+    성능에 직접 영향을 주므로, 익스포트 전에 확인할 가치가 큽니다.
+
+    검사 항목: 메시당 슬롯 수, 기본 머티리얼(lambert1) 할당 여부, 네이밍 규칙,
+    페이스 단위 할당, 사용되지 않는 셰이딩 그룹.
+
+    Args:
+        objects: 대상. 비우면 선택, 선택도 없으면 씬 전체 메시.
+        prefix: 기대하는 머티리얼 접두사. 언리얼 관행은 "M_".
+    """
+    return _unreal("check_materials", objects=objects, prefix=prefix)
+
+
+@mcp.tool()
+def maya_unreal_cleanup_materials(prefix: str = "M_",
+                                  rename: bool = True,
+                                  delete_unused: bool = True,
+                                  dry_run: bool = False) -> str:
+    """안전한 머티리얼 정리만 수행합니다 (미사용 셰이딩 그룹 삭제, 접두사 리네임).
+
+    **서로 다른 머티리얼을 병합하지 않습니다.** 어느 것을 남기고 어느 것을 버릴지는
+    룩뎁 판단이라 사람이 정해야 합니다. 슬롯을 줄여야 한다면 감사 결과를
+    사용자에게 보여주고 지시를 받으세요.
+
+    Args:
+        prefix: 붙일 머티리얼 접두사.
+        rename: 접두사 리네임 수행 여부. 레퍼런스된 머티리얼은 건너뜁니다.
+        delete_unused: 멤버가 없는 셰이딩 그룹 삭제 여부.
+        dry_run: True 면 무엇을 할지만 보고합니다.
+    """
+    return _unreal("cleanup_materials", prefix=prefix, rename=rename,
+                   delete_unused=delete_unused, dry_run=dry_run)
+
+
+@mcp.tool()
+def maya_unreal_make_collision(objects: list[str] | None = None,
+                               shape: str = "box",
+                               padding: float = 0.0,
+                               reduce_to: int = 200,
+                               dry_run: bool = False) -> str:
+    """언리얼 규칙에 맞는 콜리전 메시를 만듭니다 (UBX_/USP_/UCP_/UCX_).
+
+    콜리전 메시는 원본과 **같은 FBX 에 함께** 익스포트해야 언리얼이 인식합니다.
+    maya_unreal_export_fbx 호출 시 대상에 포함하세요.
+
+    Args:
+        objects: 대상. 비우면 선택, 선택도 없으면 씬 전체 메시.
+        shape: 콜리전 형태.
+            "box"     UBX_ — 바운딩박스. 정확하고 가장 가볍습니다. 대부분의 프롭에 충분.
+            "sphere"  USP_ — 바운딩 스피어. 공/구체형에 적합.
+            "capsule" UCP_ — 캡슐. 캐릭터·기둥 형태에 적합.
+            "convex"  UCX_ — **Maya 2022 에는 컨벡스 헐 명령이 없습니다.** 원본을
+                      줄인 사본을 만들 뿐이라 볼록함이 보장되지 않습니다. 복잡한
+                      형태라면 언리얼 스태틱 메시 에디터의 Auto Convex Collision 을
+                      쓰라고 사용자에게 안내하세요.
+        padding: 콜리전을 원본보다 이만큼 키웁니다(씬 단위). 관통 방지용.
+        reduce_to: convex 일 때 목표 삼각형 수.
+        dry_run: True 면 만들 이름과 크기만 보고합니다.
+    """
+    return _unreal("make_collision", objects=objects, shape=shape,
+                   padding=padding, reduce_to=reduce_to, dry_run=dry_run)
+
+
+@mcp.tool()
 def maya_unreal_export_fbx(path: str,
                            objects: list[str] | None = None,
                            triangulate: bool = False,

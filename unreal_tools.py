@@ -623,7 +623,246 @@ def make_lods(objects=None, keep_percent=(50, 25, 12), lod_group=True,
     }
 
 
-# ------------------------------------------------------------ 5. 익스포트
+# ------------------------------------------------------------ 5. 머티리얼 슬롯
+
+DEFAULT_SGS = ("initialShadingGroup", "initialParticleSE")
+DEFAULT_MATERIALS = ("lambert1", "particleCloud1", "standardSurface1")
+
+
+def _shading_groups(obj):
+    sgs = []
+    for shape in _shapes(obj):
+        sgs.extend(cmds.listConnections(shape, type="shadingEngine") or [])
+    return sorted(set(sgs))
+
+
+def _material_of(sg):
+    mats = cmds.listConnections(sg + ".surfaceShader") or []
+    return mats[0] if mats else None
+
+
+def _unused_shading_groups():
+    out = []
+    for sg in (cmds.ls(type="shadingEngine") or []):
+        if sg in DEFAULT_SGS:
+            continue
+        if not (cmds.sets(sg, q=True) or []):
+            out.append(sg)
+    return sorted(out)
+
+
+def check_materials(objects=None, prefix=PREFIX_MATERIAL):
+    """머티리얼 슬롯을 감사합니다. 씬을 바꾸지 않습니다.
+
+    언리얼에서 머티리얼 슬롯 하나는 드로우 콜 하나입니다. 메시당 슬롯 수를
+    줄이는 것이 성능에 직접 영향을 줍니다.
+    """
+    targets = _resolve(objects)
+    report = []
+
+    for obj in targets:
+        if not _shapes(obj):
+            continue
+        sgs = _shading_groups(obj)
+        mats = [m for m in (_material_of(s) for s in sgs) if m]
+        problems = []
+
+        if not sgs:
+            problems.append("머티리얼이 할당되지 않음")
+        if len(sgs) > 1:
+            problems.append("머티리얼 슬롯 %d개 — 언리얼에서 드로우 콜 %d회. "
+                            "합칠 수 있는지 검토하세요" % (len(sgs), len(sgs)))
+        for m in mats:
+            if m in DEFAULT_MATERIALS:
+                problems.append("기본 머티리얼 '%s' 이 할당됨 — 전용 머티리얼을 "
+                                "만들어 붙이세요" % m)
+            elif prefix and not m.startswith(prefix):
+                problems.append("머티리얼 '%s' 이 '%s' 로 시작하지 않음" % (m, prefix))
+
+        # 페이스 단위 할당 여부. 셰이딩 그룹 멤버에는 씬의 다른 오브젝트도 들어
+        # 있으므로(특히 initialShadingGroup), 반드시 이 메시의 셰이프로 걸러야
+        # 합니다. 안 그러면 lambert1 만 쓰는 오브젝트가 전부 오탐으로 잡힙니다.
+        # 컴포넌트 멤버는 셰이프가 아니라 트랜스폼 이름으로 기록되는 경우가 있어
+        # (예: "matTest_multi.f[0:20]") 둘 다 대조해야 합니다.
+        own_names = set(_short(s) for s in _shapes(obj))
+        own_names.add(_short(obj))
+        face_assigned = False
+        for sg in sgs:
+            for member in (cmds.sets(sg, q=True) or []):
+                text = str(member)
+                if "." not in text:
+                    continue
+                node = text.split(".", 1)[0].rsplit("|", 1)[-1]
+                if node in own_names:
+                    face_assigned = True
+                    break
+            if face_assigned:
+                break
+        if face_assigned:
+            problems.append("페이스 단위 머티리얼 할당 — 언리얼로 넘어가지만 "
+                            "슬롯이 늘어납니다")
+
+        report.append({
+            "object": _short(obj),
+            "clean": not problems,
+            "problems": problems,
+            "slot_count": len(sgs),
+            "materials": mats,
+            "face_level_assignment": face_assigned,
+        })
+
+    unused = _unused_shading_groups()
+    scene_warnings = []
+    if unused:
+        scene_warnings.append("사용되지 않는 셰이딩 그룹 %d개: %s"
+                              % (len(unused), ", ".join(unused[:10])))
+
+    total_slots = sum(r["slot_count"] for r in report)
+    return {
+        "checked": len(report),
+        "clean": sum(1 for r in report if r["clean"]),
+        "total_slots": total_slots,
+        "unused_shading_groups": unused,
+        "scene_warnings": scene_warnings,
+        "objects": report,
+    }
+
+
+def cleanup_materials(prefix=PREFIX_MATERIAL, rename=True,
+                      delete_unused=True, dry_run=False):
+    """안전한 머티리얼 정리만 수행합니다.
+
+    서로 다른 머티리얼을 자동으로 병합하지 않습니다. 어느 것을 남길지는
+    룩뎁 판단이라 사람이 정해야 합니다. 여기서는 되돌려도 손해가 없는 것만 합니다.
+    """
+    actions = []
+
+    if delete_unused:
+        unused = _unused_shading_groups()
+        if unused:
+            actions.append("사용되지 않는 셰이딩 그룹 %d개 삭제: %s"
+                           % (len(unused), ", ".join(unused[:10])))
+            if not dry_run:
+                cmds.delete(unused)
+
+    renamed = []
+    if rename and prefix:
+        for mat in (cmds.ls(materials=True) or []):
+            if mat in DEFAULT_MATERIALS or mat.startswith(prefix):
+                continue
+            if cmds.referenceQuery(mat, isNodeReferenced=True):
+                continue                       # 레퍼런스 노드는 이름을 못 바꿉니다
+            new = prefix + mat
+            renamed.append("%s -> %s" % (mat, new))
+            if not dry_run:
+                cmds.rename(mat, new)
+    if renamed:
+        actions.append("머티리얼 리네임 %d개: %s"
+                       % (len(renamed), ", ".join(renamed[:10])))
+
+    return {"dry_run": dry_run, "actions": actions or ["정리할 것이 없습니다"]}
+
+
+# ------------------------------------------------------------ 6. 콜리전
+
+COLLISION_PREFIX = {"box": "UBX_", "sphere": "USP_", "capsule": "UCP_", "convex": "UCX_"}
+
+
+def make_collision(objects=None, shape="box", padding=0.0, reduce_to=200,
+                   dry_run=False):
+    """언리얼 규칙(UBX_/USP_/UCP_/UCX_)에 맞는 콜리전 메시를 만듭니다.
+
+    shape:
+      "box"     UBX_ — 바운딩박스. 정확하고 가장 가볍습니다. 대부분의 프롭에 충분.
+      "sphere"  USP_ — 바운딩 스피어.
+      "capsule" UCP_ — 캡슐. 캐릭터/기둥 형태에 적합.
+      "convex"  UCX_ — **Maya 2022 에는 컨벡스 헐 명령이 없습니다.** 원본을
+                reduce_to 삼각형까지 줄인 사본을 만들 뿐이며, 볼록함이 보장되지
+                않습니다. 언리얼이 임포트 시 헐을 다시 계산하므로 동작은 하지만
+                의도와 다른 형태가 나올 수 있습니다. 복잡한 형태라면 언리얼
+                스태틱 메시 에디터의 Auto Convex Collision 을 쓰는 편이 낫습니다.
+
+    padding: 콜리전을 원본보다 이만큼 키웁니다(씬 단위). 관통 방지에 씁니다.
+    """
+    if shape not in COLLISION_PREFIX:
+        raise ValueError("shape 은 %s 중 하나여야 합니다" % ", ".join(sorted(COLLISION_PREFIX)))
+
+    targets = _resolve(objects)
+    made = []
+
+    for obj in targets:
+        if not _shapes(obj):
+            continue
+        name = _short(obj)
+        if name.startswith(tuple(COLLISION_PREFIX.values())):
+            continue                            # 콜리전 메시 자신은 건너뜁니다
+
+        bbox = cmds.exactWorldBoundingBox(obj)
+        size = [bbox[3] - bbox[0], bbox[4] - bbox[1], bbox[5] - bbox[2]]
+        center = [(bbox[0] + bbox[3]) / 2.0, (bbox[1] + bbox[4]) / 2.0,
+                  (bbox[2] + bbox[5]) / 2.0]
+        size = [s + padding * 2 for s in size]
+
+        col_name = "%s%s_01" % (COLLISION_PREFIX[shape], name)
+        info = {"source": name, "collision": col_name, "shape": shape,
+                "size": [round(s, 3) for s in size]}
+
+        if dry_run:
+            made.append(info)
+            continue
+
+        if shape == "box":
+            col = cmds.polyCube(name=col_name, w=size[0], h=size[1], d=size[2],
+                                sx=1, sy=1, sz=1, ch=False)[0]
+        elif shape == "sphere":
+            r = max(size) / 2.0
+            col = cmds.polySphere(name=col_name, r=r, sx=12, sy=8, ch=False)[0]
+            info["radius"] = round(r, 3)
+        elif shape == "capsule":
+            r = max(size[0], size[2]) / 2.0
+            col = cmds.polyCylinder(name=col_name, r=r, h=max(size[1] - r * 2, 0.01),
+                                    sx=12, sy=1, sz=1, roundCap=True, ch=False)[0]
+            info["radius"] = round(r, 3)
+        else:                                   # convex
+            col = cmds.duplicate(obj, name=col_name)[0]
+            parents = cmds.listRelatives(col, parent=True)
+            if parents:
+                col = cmds.parent(col, world=True)[0]
+            tris = _tri_count(col)
+            if tris > reduce_to:
+                cmds.polyReduce(col, version=1,
+                                percentage=max(1.0, 100.0 - reduce_to * 100.0 / tris),
+                                preserveTopology=False, keepBorder=False,
+                                keepMapBorder=False, keepHardEdge=False,
+                                replaceOriginal=True, constructionHistory=False)
+            info["tris"] = _tri_count(col)
+            info["warning"] = ("볼록함이 보장되지 않습니다. 언리얼이 임포트 시 "
+                              "헐을 다시 계산합니다.")
+
+        cmds.setAttr(col + ".translate", center[0], center[1], center[2])
+        # 콜리전 메시는 렌더링되지 않아야 합니다.
+        try:
+            for s in _shapes(col):
+                cmds.setAttr(s + ".castsShadows", 0)
+                cmds.setAttr(s + ".receiveShadows", 0)
+                cmds.setAttr(s + ".primaryVisibility", 0)
+        except Exception:
+            pass
+        info["tris"] = info.get("tris", _tri_count(col))
+        made.append(info)
+
+    cmds.select(clear=True)
+    return {
+        "dry_run": dry_run,
+        "created": len(made),
+        "shape": shape,
+        "collision": made,
+        "note": ("콜리전 메시는 원본과 같은 FBX 에 함께 익스포트해야 언리얼이 "
+                 "인식합니다. maya_unreal_export_fbx 호출 시 대상에 포함하세요."),
+    }
+
+
+# ------------------------------------------------------------ 7. 익스포트
 
 def export_fbx(objects=None, path=None, smoothing_groups=True, tangents=True,
                triangulate=False, skins=False, blendshapes=False,
