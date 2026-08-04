@@ -509,6 +509,39 @@ def _skin_clusters_for(obj):
     return sorted(set(out))
 
 
+def _classify_unused_influence(joint, weighted_names):
+    """웨이트가 없는 영향 조인트를 성격별로 나눕니다.
+
+    "웨이트가 없다"는 "필요 없다"가 아닙니다. 실제 캐릭터에서 확인해 보니
+    미사용 53개 중 대부분이 반드시 있어야 하는 본이었습니다 — 언리얼 IK 본
+    (ik_hand_gun 등), 무기 소켓, 루트, 방향 계산용 끝 본, 애니메이션으로
+    구동되는 머리카락 본. 지표 하나로 제거를 권하면 안 되는 이유입니다.
+    """
+    short = joint.rsplit("|", 1)[-1].rsplit(":", 1)[-1]
+    lowered = short.lower()
+
+    # 언리얼 규격·게임플레이용. 지우면 리타게팅이나 무기 부착이 깨집니다.
+    engine_markers = ("ik_", "weapon", "socket", "attach", "node")
+    if lowered == "root" or any(m in lowered for m in engine_markers):
+        return "engine", "언리얼 규격/게임플레이용 본 — 유지해야 합니다"
+
+    children = cmds.listRelatives(joint, children=True, type="joint", fullPath=True) or []
+    descendants = cmds.listRelatives(joint, allDescendents=True, type="joint",
+                                     fullPath=True) or []
+    if any(d.rsplit("|", 1)[-1] in weighted_names for d in descendants):
+        return "structural", "웨이트가 있는 자식 본을 가집니다 — 지우면 계층이 끊어집니다"
+
+    if not children:
+        return "tip", "자식이 없는 끝 본 — 부모의 방향 계산용입니다"
+
+    return "review", "용도가 분명하지 않습니다 — 리거 확인이 필요합니다"
+
+
+def _is_animated(joint):
+    return bool(cmds.listConnections(joint, source=True, destination=False,
+                                     type="animCurve") or [])
+
+
 def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
                report_limit=20):
     """스킨 웨이트를 감사합니다. 씬을 바꾸지 않습니다.
@@ -605,6 +638,17 @@ def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
                         unnormalized.append({"vertex": v, "sum": round(total, 6)})
 
             unused = [influences[i] for i, used in enumerate(influence_used) if not used]
+            weighted_names = set(influences[i] for i, used in enumerate(influence_used) if used)
+
+            classified = {"engine": [], "structural": [], "tip": [], "review": []}
+            for joint in unused:
+                kind, reason = _classify_unused_influence(joint, weighted_names)
+                entry = {"joint": joint.rsplit("|", 1)[-1], "reason": reason}
+                if kind == "review" and _is_animated(joint):
+                    entry["animated"] = True
+                    entry["reason"] = ("애니메이션 커브가 있습니다 — 물리/보조 모션용일 "
+                                       "가능성이 높습니다")
+                classified[kind].append(entry)
 
             problems = []
             if over_total:
@@ -622,10 +666,15 @@ def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
                     % unnorm_total)
             if negative:
                 problems.append("음수 웨이트가 있습니다.")
-            if unused:
+            # 미사용 조인트는 그 자체로 문제가 아닙니다. 검토가 필요한 것만 올립니다.
+            needs_review = classified["review"]
+            if needs_review:
                 problems.append(
-                    "웨이트가 전혀 없는 영향 조인트 %d개 — 언리얼로 본은 넘어가지만 "
-                    "쓰이지 않습니다. 제거하면 본 수가 줄어듭니다." % len(unused))
+                    "웨이트가 없고 용도가 분명하지 않은 조인트 %d개: %s. "
+                    "**지우기 전에 리거에게 확인하세요** — 애니메이션이나 물리로 "
+                    "구동되는 본일 수 있습니다."
+                    % (len(needs_review),
+                       ", ".join(e["joint"] for e in needs_review[:8])))
 
             report.append({
                 "object": name,
@@ -638,10 +687,16 @@ def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
                 "max_influences_found": max_found,
                 "max_influences_allowed": max_influences,
                 "counts": {"over_limit": over_total, "unweighted": unweighted_total,
-                           "unnormalized": unnorm_total, "unused_influences": len(unused)},
+                           "unnormalized": unnorm_total, "unused_influences": len(unused),
+                           "unused_needs_review": len(classified["review"])},
                 "samples": {"over_limit": over_limit, "unweighted": unweighted,
                             "unnormalized": unnormalized, "negative": negative},
-                "unused_influences": unused[:report_limit],
+                "unused_influences": {
+                    "engine": classified["engine"][:report_limit],
+                    "structural": classified["structural"][:report_limit],
+                    "tip": classified["tip"][:report_limit],
+                    "review": classified["review"][:report_limit],
+                },
             })
 
     return {
@@ -650,7 +705,9 @@ def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
         "max_influences_allowed": max_influences,
         "objects": report,
         "note": ("영향 조인트 상한은 프로젝트 설정에 따라 다릅니다. "
-                 "UnlimitedBoneInfluences 가 꺼져 있으면 초과분은 임포트 시 잘립니다."),
+                 "UnlimitedBoneInfluences 가 꺼져 있으면 초과분은 임포트 시 잘립니다. "
+                 "웨이트가 없는 조인트는 그 자체로 문제가 아닙니다 — IK 본, 무기 소켓, "
+                 "끝 본, 물리 구동 본은 웨이트가 없는 것이 정상입니다."),
     }
 
 
