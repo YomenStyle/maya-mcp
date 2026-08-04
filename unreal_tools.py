@@ -865,7 +865,8 @@ def make_collision(objects=None, shape="box", padding=0.0, reduce_to=200,
 # ------------------------------------------------------------ 7. 임포트
 
 def import_fbx(path=None, namespace=None, group=None, up_axis="y",
-               scale_factor=1.0, import_mode="add"):
+               scale_factor=1.0, import_mode="add", take_index=1,
+               match_source_frame_rate=True, fill_timeline=True):
     """FBX 를 현재 씬으로 가져옵니다. 언리얼에서 뽑은 레벨 에셋을 받는 경로입니다.
 
     path: FBX 파일 경로.
@@ -879,6 +880,12 @@ def import_fbx(path=None, namespace=None, group=None, up_axis="y",
     scale_factor: 임포트 스케일. Maya 와 언리얼 모두 cm 면 1.0 입니다.
     import_mode: "add"(새로 추가) | "merge"(같은 이름 노드에 병합) |
         "exmerge"(존재하는 것만 갱신).
+    take_index: 가져올 애니메이션 테이크. 1 이 첫 테이크입니다. 0 으로 두면
+        **애니메이션이 통째로 안 들어옵니다** — 메시만 필요할 때만 0 을 쓰세요.
+    match_source_frame_rate: True 면 Maya 씬 프레임레이트를 FBX 쪽에 맞춥니다.
+        끄면 언리얼의 30fps 애니메이션이 24fps(film) 씬에서 리샘플되어 프레임
+        번호가 원본과 어긋납니다(62프레임 -> 약 50프레임).
+    fill_timeline: True 면 타임라인 범위를 가져온 애니메이션에 맞춥니다.
     """
     if not path:
         raise ValueError("path 가 필요합니다.")
@@ -906,15 +913,38 @@ def import_fbx(path=None, namespace=None, group=None, up_axis="y",
     mel.eval("FBXImportConvertDeformingNullsToJoint -v false")
     mel.eval("FBXImportHardEdges -v false")
     mel.eval("FBXImportCacheFile -v false")
+    mel.eval("FBXImportSkins -v true")
+    mel.eval("FBXImportShapes -v true")
+
+    # 테이크를 고르지 않으면 애니메이션이 하나도 들어오지 않습니다. 'Animation'
+    # 포함 플래그가 켜져 있어도 그렇습니다 — 실제로 이것 때문에 애님 시퀀스를
+    # 가져왔는데 커브가 0개인 상태를 성공으로 착각할 뻔했습니다.
+    mel.eval("FBXImportSetTake -takeIndex %d" % int(take_index))
+    mel.eval("FBXImportFillTimeline -v %s" % ("true" if fill_timeline else "false"))
+    # 씬 프레임레이트를 FBX 에 맞춥니다. 끄면 30fps 애니메이션이 24fps 씬에서
+    # 리샘플되어 키 위치가 원본 프레임 번호와 어긋납니다.
+    mel.eval("FBXImportSetMayaFrameRate -v %s"
+             % ("true" if match_source_frame_rate else "false"))
 
     before = set(cmds.ls(long=True))
 
-    kwargs = {"i": True, "type": "FBX", "ignoreVersion": True,
-              "mergeNamespacesOnClash": False, "options": "fbx",
-              "preserveReferences": True, "returnNewNodes": False}
+    # MEL 의 FBXImport 를 씁니다. cmds.file(i=True, type="FBX") 는 노드는 잘
+    # 가져오지만 **씬 레벨 옵션을 무시합니다** — FBXImportSetMayaFrameRate 와
+    # FBXImportFillTimeline 이 켜져 있어도 씬 프레임레이트와 타임라인이 그대로라,
+    # 30fps 애니메이션이 24fps 씬에서 리샘플되어 62프레임짜리가 50프레임으로
+    # 들어옵니다. FBXImport 로 부르면 둘 다 정상 적용됩니다.
     if namespace:
-        kwargs["namespace"] = namespace
-    cmds.file(path, **kwargs)
+        # FBXImport 에는 네임스페이스 인자가 없어서 직접 만들고 활성화합니다.
+        if not cmds.namespace(exists=namespace):
+            cmds.namespace(add=namespace)
+        previous_ns = cmds.namespaceInfo(currentNamespace=True)
+        cmds.namespace(set=namespace)
+        try:
+            mel.eval('FBXImport -f "%s";' % path.replace("\\", "/"))
+        finally:
+            cmds.namespace(set=previous_ns)
+    else:
+        mel.eval('FBXImport -f "%s";' % path.replace("\\", "/"))
 
     new_nodes = sorted(set(cmds.ls(long=True)) - before)
     new_transforms = [n for n in new_nodes if cmds.objectType(n) == "transform"]
@@ -930,6 +960,30 @@ def import_fbx(path=None, namespace=None, group=None, up_axis="y",
     meshes = [n for n in new_nodes if cmds.objectType(n) == "mesh"]
     joints = [n for n in new_nodes if cmds.objectType(n) == "joint"]
 
+    # 애니메이션이 실제로 들어왔는지 수치로 확인할 수 있게 담습니다. 커브 0 개는
+    # 조용한 실패라, 호출자가 이 값을 보고 바로 알아챌 수 있어야 합니다.
+    curve_types = ("animCurveTA", "animCurveTL", "animCurveTU", "animCurveTT")
+    curves = [n for n in new_nodes if cmds.objectType(n) in curve_types]
+    key_times = []
+    key_total = 0
+    for curve in curves:
+        count = cmds.keyframe(curve, q=True, keyframeCount=True) or 0
+        key_total += count
+        if count and len(key_times) < 4000:
+            key_times.extend(cmds.keyframe(curve, q=True, timeChange=True) or [])
+
+    animation = {
+        "curves": len(curves),
+        "keys": key_total,
+        "frame_range": ([round(min(key_times), 3), round(max(key_times), 3)]
+                        if key_times else None),
+        "scene_fps": cmds.currentUnit(q=True, time=True),
+        "take_index": int(take_index),
+    }
+    if curves:
+        animation["timeline"] = [cmds.playbackOptions(q=True, min=True),
+                                 cmds.playbackOptions(q=True, max=True)]
+
     grouped = None
     if group and roots:
         grouped = cmds.group(roots, name=group)
@@ -943,9 +997,14 @@ def import_fbx(path=None, namespace=None, group=None, up_axis="y",
         "roots": [_short(r) for r in roots],
         "counts": {"new_nodes": len(new_nodes), "transforms": len(new_transforms),
                    "meshes": len(meshes), "joints": len(joints)},
+        "animation": animation,
         "group": _short(grouped) if grouped else None,
         "warnings": warnings,
     }
+    if joints and not curves and take_index:
+        result["warnings"].append(
+            "조인트는 들어왔는데 애니메이션 커브가 0개입니다. FBX 에 테이크가 "
+            "없거나 take_index 가 틀렸을 수 있습니다.")
     if not new_nodes:
         result["warnings"].append(
             "새로 들어온 노드가 없습니다. import_mode 가 'merge'/'exmerge' 이거나 "
