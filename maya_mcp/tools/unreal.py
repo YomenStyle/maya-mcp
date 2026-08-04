@@ -67,6 +67,37 @@ def register_unreal_tools(mcp, conn: MayaConnection) -> None:
         """
         return conn.call("unreal.check_materials", {"objects": objects, "prefix": prefix})
 
+    @mcp.tool()
+    def maya_unreal_check_skin(objects: list[str] | None = None,
+                               max_influences: int = 4,
+                               weight_tolerance: float = 1e-4,
+                               report_limit: int = 20) -> dict:
+        """스킨 웨이트를 감사합니다. 씬을 바꾸지 않습니다.
+
+        언리얼이 임포트할 때 **조용히 잘라내는 것들**을 찾습니다. 버텍스당 영향
+        조인트가 상한을 넘으면 언리얼은 약한 웨이트부터 버리고 나머지를 정규화하는데,
+        경고가 눈에 잘 띄지 않습니다. Maya 에서 멀쩡하던 디포메이션이 엔진에서만
+        달라지는 흔한 원인입니다.
+
+        **자동 수정을 하지 않습니다.** 어느 영향을 버릴지는 디포메이션 판단이라
+        사람이 정해야 합니다. 보고된 정점 번호를 사용자에게 전달하세요.
+
+        검사 항목: 버텍스당 영향 조인트 수 초과, 웨이트가 전혀 없는 버텍스(원점으로
+        무너짐), 웨이트 합이 1이 아닌 버텍스, 음수 웨이트, 웨이트가 하나도 없는
+        영향 조인트(본만 차지하고 쓰이지 않음).
+
+        Args:
+            objects: 대상. 비우면 선택, 선택도 없으면 씬 전체 메시.
+            max_influences: 버텍스당 허용 영향 조인트 수. 4 는 게임 표준이자 가장
+                안전한 값입니다. 프로젝트가 UnlimitedBoneInfluences 를 켜 두었다면
+                올려도 되지만, 꺼져 있으면 초과분은 임포트 시 잘립니다.
+            weight_tolerance: 웨이트 합이 1 에서 이만큼 벗어나면 비정규화로 봅니다.
+            report_limit: 문제 정점을 몇 개까지 예시로 돌려줄지.
+        """
+        return conn.call("unreal.check_skin", {
+            "objects": objects, "max_influences": max_influences,
+            "weight_tolerance": weight_tolerance, "report_limit": report_limit})
+
     # ---------------------------------------------------------- 정리
 
     @mcp.tool()

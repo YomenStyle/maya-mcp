@@ -497,7 +497,164 @@ def check_skeleton(root=None, primary_axis="x", tolerance_deg=1.0,
     }
 
 
-# ------------------------------------------------------------ 4. LOD 생성
+# ------------------------------------------------------------ 4. 스킨 웨이트 감사
+
+def _skin_clusters_for(obj):
+    """트랜스폼/셰이프에 물린 skinCluster 목록."""
+    out = []
+    for shape in _shapes(obj):
+        for node in (cmds.listHistory(shape, pruneDagObjects=False) or []):
+            if cmds.nodeType(node) == "skinCluster":
+                out.append(node)
+    return sorted(set(out))
+
+
+def check_skin(objects=None, max_influences=4, weight_tolerance=1e-4,
+               report_limit=20):
+    """스킨 웨이트를 감사합니다. 씬을 바꾸지 않습니다.
+
+    언리얼이 임포트할 때 **조용히 잘라내는 것들**을 찾는 것이 목적입니다.
+    버텍스당 영향 조인트가 상한을 넘으면 언리얼은 약한 것부터 버리고 나머지를
+    정규화합니다. 경고가 눈에 잘 띄지 않아서, Maya 에서 멀쩡하던 디포메이션이
+    엔진에서만 달라지는 원인이 됩니다.
+
+    max_influences: 버텍스당 허용 영향 조인트 수. 기본 4 는 게임 표준이자 가장
+        안전한 값입니다. 프로젝트가 UnlimitedBoneInfluences 를 켜 두었다면
+        더 올려도 되지만, 꺼져 있으면 초과분은 잘립니다.
+    weight_tolerance: 웨이트 합이 1 에서 이만큼 벗어나면 비정규화로 봅니다.
+    report_limit: 문제 버텍스를 몇 개까지 예시로 돌려줄지.
+    """
+    import maya.api.OpenMaya as om
+    import maya.api.OpenMayaAnim as oma
+
+    targets = _resolve(objects)
+    report = []
+
+    for obj in targets:
+        shapes = _shapes(obj)
+        if not shapes:
+            continue
+        clusters = _skin_clusters_for(obj)
+        name = _short(obj)
+
+        if not clusters:
+            report.append({"object": name, "clean": True, "skinned": False,
+                           "problems": [], "note": "스킨이 없는 메시입니다."})
+            continue
+
+        for cluster in clusters:
+            sel = om.MSelectionList()
+            sel.add(cluster)
+            fn_skin = oma.MFnSkinCluster(sel.getDependNode(0))
+
+            sel_shape = om.MSelectionList()
+            sel_shape.add(shapes[0])
+            shape_dag = sel_shape.getDagPath(0)
+            vert_count = om.MFnMesh(shape_dag).numVertices
+
+            # 전체 버텍스를 한 번에 읽습니다. skinPercent 를 버텍스마다 부르면
+            # 5만 정점짜리 캐릭터에서 몇 분씩 걸립니다.
+            comp_fn = om.MFnSingleIndexedComponent()
+            comp = comp_fn.create(om.MFn.kMeshVertComponent)
+            comp_fn.setCompleteData(vert_count)
+
+            weights, influence_count = fn_skin.getWeights(shape_dag, comp)
+            influences = [d.partialPathName() for d in fn_skin.influenceObjects()]
+
+            over_limit = []          # (vertex, 영향 수)
+            unnormalized = []        # (vertex, 합)
+            unweighted = []          # 합이 0 인 버텍스 — 원점으로 무너집니다
+            negative = []            # 음수 웨이트
+            max_found = 0
+            influence_used = [False] * influence_count
+
+            # 한 번만 훑습니다. 전체 개수와 예시를 같이 모으되, 예시만 상한을
+            # 둡니다. 5만 정점 x 127 조인트면 두 번 훑는 것과 차이가 큽니다.
+            over_total = unnorm_total = unweighted_total = 0
+            for v in range(vert_count):
+                base = v * influence_count
+                nonzero = 0
+                total = 0.0
+                for i in range(influence_count):
+                    w = weights[base + i]
+                    if w > 0.0:
+                        nonzero += 1
+                        total += w
+                        influence_used[i] = True
+                    elif w < 0.0:
+                        total += w
+                        if len(negative) < report_limit:
+                            negative.append({"vertex": v, "influence": influences[i],
+                                             "weight": round(w, 6)})
+
+                if nonzero > max_found:
+                    max_found = nonzero
+
+                if nonzero > max_influences:
+                    over_total += 1
+                    if len(over_limit) < report_limit:
+                        over_limit.append({"vertex": v, "influences": nonzero})
+
+                if nonzero == 0:
+                    unweighted_total += 1
+                    if len(unweighted) < report_limit:
+                        unweighted.append(v)
+                elif abs(total - 1.0) > weight_tolerance:
+                    unnorm_total += 1
+                    if len(unnormalized) < report_limit:
+                        unnormalized.append({"vertex": v, "sum": round(total, 6)})
+
+            unused = [influences[i] for i, used in enumerate(influence_used) if not used]
+
+            problems = []
+            if over_total:
+                problems.append(
+                    "버텍스 %d개가 영향 조인트 %d개 상한을 넘습니다 (최대 %d개). "
+                    "언리얼이 약한 웨이트부터 버리고 정규화하므로 엔진에서 디포메이션이 "
+                    "달라집니다." % (over_total, max_influences, max_found))
+            if unweighted_total:
+                problems.append(
+                    "웨이트가 하나도 없는 버텍스 %d개 — 원점으로 무너집니다."
+                    % unweighted_total)
+            if unnorm_total:
+                problems.append(
+                    "웨이트 합이 1이 아닌 버텍스 %d개 — 스케일이 틀어져 보입니다."
+                    % unnorm_total)
+            if negative:
+                problems.append("음수 웨이트가 있습니다.")
+            if unused:
+                problems.append(
+                    "웨이트가 전혀 없는 영향 조인트 %d개 — 언리얼로 본은 넘어가지만 "
+                    "쓰이지 않습니다. 제거하면 본 수가 줄어듭니다." % len(unused))
+
+            report.append({
+                "object": name,
+                "skin_cluster": cluster,
+                "clean": not problems,
+                "skinned": True,
+                "problems": problems,
+                "vertices": vert_count,
+                "influences": influence_count,
+                "max_influences_found": max_found,
+                "max_influences_allowed": max_influences,
+                "counts": {"over_limit": over_total, "unweighted": unweighted_total,
+                           "unnormalized": unnorm_total, "unused_influences": len(unused)},
+                "samples": {"over_limit": over_limit, "unweighted": unweighted,
+                            "unnormalized": unnormalized, "negative": negative},
+                "unused_influences": unused[:report_limit],
+            })
+
+    return {
+        "checked": len(report),
+        "clean": sum(1 for r in report if r["clean"]),
+        "max_influences_allowed": max_influences,
+        "objects": report,
+        "note": ("영향 조인트 상한은 프로젝트 설정에 따라 다릅니다. "
+                 "UnlimitedBoneInfluences 가 꺼져 있으면 초과분은 임포트 시 잘립니다."),
+    }
+
+
+# ------------------------------------------------------------ 5. LOD 생성
 
 def _tri_count(obj):
     try:

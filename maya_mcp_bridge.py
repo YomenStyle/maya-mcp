@@ -346,6 +346,7 @@ _METHODS = {
     "unreal.check":            (_unreal_method("check"), False),
     "unreal.check_skeleton":   (_unreal_method("check_skeleton"), False),
     "unreal.check_materials":  (_unreal_method("check_materials"), False),
+    "unreal.check_skin":       (_unreal_method("check_skin"), False),
     "unreal.prepare":          (_unreal_method("prepare"), True),
     "unreal.cleanup_materials": (_unreal_method("cleanup_materials"), True),
     "unreal.make_lods":        (_unreal_method("make_lods"), True),
